@@ -1,5 +1,79 @@
 # Work log
 
+## 6 November 2026 — Approved policies, backend foundation and Level 1
+
+Status: **Level 1 locally verified: 32 integration tests passed**, build and lint/format checks passed. No external Koya assessor was run. Stop at this requested implementation boundary; Levels 2–5 remain unimplemented/unverified. This entry supersedes historical design-only status statements below.
+
+### Scope and owner policies recorded
+
+- Owner approved the architecture and ten behaviour policies. API.md/ARCHITECTURE.md now distinguish those policies from official requirements: reset 200 {}, invalid/duplicate reset 400 without mutation, replay/422 before rate admission, canonical parsed-body equivalence preserving strings, response retention until reset, no transient/429 caching, admitted-attempt rolling 60 seconds, no shared unusable-email bucket, history missing-email/malformed/foreign-cursor 400, atomic four-table reset, started-slot 400 before occupancy, cancelled history and post-start cancellation.
+- Corrected only the outdated frontend technology entry in PRD.md to Next.js/TypeScript with server-side API proxy; functional requirements unchanged.
+- Interpreted task item GET /bookings/ as the official Level 1 GET /bookings/{id}. Did not invent another endpoint or implement Level 4 history.
+
+### Implementation and architectural decisions
+
+- Inspected the existing NestJS scaffold, package/build/test configuration, repository status and official-contract documentation before editing. This workspace now has Git; the prior historical no-Git limitation no longer applies. Starting Git status was clean.
+- Added node-postgres, Drizzle ORM/Kit, dotenv, class-validator's date-time helper and pg types, with a lockfile update. Used stable installed packages rather than a release-candidate migration API. Official Drizzle PostgreSQL/migration guidance was consulted: https://orm.drizzle.team/docs/get-started-postgresql and https://orm.drizzle.team/docs/migrations.
+- Added compose.yaml with local-only PostgreSQL port, named persistent volume, required password and health check. Generated credentials in ignored backend/.env.level1-local; preserved existing developer backend/.env. No secrets added to tracked files.
+- Added typed DatabaseModule/Service with required DATABASE_URL, UTC sessions, startup connectivity and graceful pool shutdown. Added Drizzle config/schema, initial generated SQL/snapshot/journal and explicit db:generate/db:migrate scripts. No runtime schema synchronization.
+- Initial migration installs slots, bookings, idempotency_records, booking_attempts, FK/check/index constraints and partial UNIQUE confirmed-slot index. Text slot IDs and required end timestamps match the official source. Auxiliary tables exist for reset lifecycle only; no later-level request logic was added.
+- Thin AppController delegates to reset/slots/bookings services. Removed scaffold root endpoint/AppService and obsolete Hello World unit/e2e assertions. Only the four Level 1 routes exist. Common error filter preserves {error: string} and hides infrastructure details.
+- Reset validates before destructive writes, rejects duplicate IDs, clears all four tables and installs caller inventory in one transaction. Inserts are batched below PostgreSQL parameter limits. Reset takes an exclusive advisory transaction lock; booking takes its shared mode to protect the existence-check/insert boundary against reset.
+- Listing uses a single correlated NOT EXISTS query for availability and parameterized exact provider filtering. Booking creation generates a UUID string, commits before 201 and lookup returns exactly six public Booking fields. Basic shape/string checks and canonical stored name/email values protect persistence; full Level 2 validation/authentication is deferred.
+- The database index prevents duplicates now, but slot row locking, intended 409 mapping and concurrent-request acceptance tests remain Level 3. A duplicate insert currently returns generic 500. No API-key guard, started-slot rejection, cancellation/history, idempotency or limiter request handler was implemented.
+
+### Tests, results and encountered problems
+
+- Local Docker PostgreSQL 18.6 started successfully after approved Docker access; npm dependency retrieval also required approved network escalation. Created development clinic_booking and dedicated clinic_booking_test; no production database was accessed.
+- db:generate and db:migrate passed. Test setup applies the same migration twice successfully. Reviewed generated SQL for the confirmed-slot unique predicate and FK/checks.
+- Initial test invocation failed setup (30 failures reported) because the dedicated test database was not yet provisioned. Provisioned it before retrying.
+- First feature run: 28 passed, 2 failed. Availability incorrectly stayed true after booking; the hand-built correlated SQL lost qualification through ORM projection. Replaced with Drizzle correlated NOT EXISTS; rerun passed 30/30.
+- Corrected six lint errors from Jest's any-typed asymmetric matchers. Added two contract/storage checks; final npm test passed **1 suite, 32 tests, 0 failures, 6.419 seconds**. Real PostgreSQL, NestJS and Supertest; no database mocks. Tests verify invalid-reset state preservation and insertion-failure rollback, exact provider matching, booking/lookup persistence across requests and app restart, and absence of later-level routes.
+- npm run build passed; dist/main.js exists. ESLint src/test/config passed with no warnings/errors; Prettier checks passed. No concurrency, cancellation, retry or rate-limit acceptance suite was run or claimed complete. Full details/reproduction are in TESTING.md.
+- npm install reported 34 dependency audit findings (5 low, 27 moderate, 2 high). No forced/unrelated upgrades were made; remediation requires a separate dependency review. No independent audit-remediation result is claimed.
+
+### Documentation and final review
+
+Updated API.md, ARCHITECTURE.md, DATABASE.md, TESTING.md, DEPLOYMENT.md and this log, plus the approved PRD frontend row and backend README. Official specification/PDF hash is unchanged. Reviewed source, migration, configuration, ignored credential paths and documentation for the implemented Level 1 boundary. Exact file inventory is available through Git status and the task response.
+
+Final Git whitespace check passed. Generated credential files and existing .env are ignored; no credential contents are included in the changes. The only PRD content change is the authorized frontend technology row (plus a final newline).
+
+### File inventory for this implementation
+
+Created:
+
+- compose.yaml
+- backend/.env.example
+- backend/drizzle.config.ts
+- backend/drizzle/0000_stormy_killmonger.sql
+- backend/drizzle/meta/0000_snapshot.json
+- backend/drizzle/meta/_journal.json
+- backend/src/database/database.module.ts
+- backend/src/database/database.service.ts
+- backend/src/database/schema.ts
+- backend/src/database/locks.ts
+- backend/src/database/migrate.ts
+- backend/src/bookings/bookings.service.ts
+- backend/src/reset/reset.service.ts
+- backend/src/slots/slots.service.ts
+- backend/src/common/input.ts
+- backend/src/common/api-error.filter.ts
+
+Modified:
+
+- backend/package.json and backend/package-lock.json
+- backend/src/app.controller.ts, backend/src/app.module.ts and backend/src/main.ts
+- backend/tsconfig.build.json
+- backend/test/app.e2e-spec.ts and backend/test/jest-e2e.json
+- backend/README.md
+- docs/API.md, docs/ARCHITECTURE.md, docs/DATABASE.md, docs/TESTING.md, docs/DEPLOYMENT.md, docs/PRD.md and docs/CODEX_WORKFLOW.md
+
+Removed obsolete scaffold files: backend/src/app.service.ts and backend/src/app.controller.spec.ts. The existing e2e file was replaced with the PostgreSQL integration suite. No frontend or official specification file was modified. Ignored local credential/build/dependency files are not deliverable source changes.
+
+### Remaining work
+
+Await the next explicitly requested task. Level 2 needs X-API-Key and full validation; Level 3 needs cancellation and deliberate concurrent-conflict behaviour; Level 4 needs idempotency/history; Level 5 needs admitted-attempt rolling limiter and combined precedence tests. Next.js proxy/UI, hosted deployment, external assessment and dependency-audit remediation remain outstanding. Do not mark a higher assessment level verified from this foundation or proceed automatically.
+
 ## 6 November 2026 — Official specification reconciliation
 
 Status: contract/design review completed; no application implementation authorized or performed. This entry supersedes the earlier PRD-only review's source-availability and frontend-decision blockers; the historical entry is retained below.

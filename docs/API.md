@@ -1,6 +1,12 @@
 # API contract — official Koya assessment
 
-Reviewed 6 November 2026. Contract extraction only; no endpoint has been implemented or verified by this task.
+Updated 6 November 2026. This document records the full official contract plus separately labelled owner policies. The backend foundation and Level 1 are implemented; see TESTING.md for actual results. Later-level contracts below remain requirements, not claims of implemented behaviour.
+
+## Current implementation boundary
+
+Implemented: POST /reset (200 {}), GET /slots, POST /bookings (Level 1 creation only), GET /bookings/{id}. No GET /, GET /bookings history or DELETE cancellation route exists. Names/emails are stored canonically and basic object/string input checks protect writes, but full Level 2 required/nonempty/email/start validation is deferred. The partial unique index exists; controlled duplicate-slot 409 handling and concurrent-request acceptance tests are deferred to Level 3. A duplicate insert currently returns generic 500 while the index prevents a duplicate row.
+
+Per the explicit Level 1-only authorization, there is no API-key guard yet. Global authentication described below is the target contract for Level 2, not current runtime behaviour. Idempotency headers and rate limiting are not processed yet; their tables exist only for foundation/reset lifecycle support. The Level 1 server is not ready for external deployment.
 
 ## Authority and interpretation
 
@@ -215,13 +221,25 @@ Return the person's bookings oldest first. `bookings` is an array of Booking; `n
 
 Complete required status set: **200, 201, 400, 401, 404, 409, 422, 429**. The source does not declare 204, 403, 405, infrastructure-failure codes, reset-validation codes or statuses for several invalid-query cases. Framework defaults must not be presented as official requirements. All error responses, including any implementation-defined ones later approved, must retain the common Error shape.
 
-## Material ambiguities remaining
+## Owner-approved implementation policies
 
-1. What exact JSON should reset's 200 response contain? What should invalid/duplicate-slot reset input return? The schema permits empty strings and does not require end after start.
-2. Does rate limiting override an otherwise valid idempotency replay/422, or does replay override 429? Both unconditional rules appear in POST prose without precedence. Likewise a started and already booked slot has no defined 400/409 precedence.
-3. Does same body mean raw bytes, parsed JSON values or normalized booking fields? What outcomes are retained, for how long, and what happens to keys on reset?
-4. Is the minute rolling or fixed? Do denied requests count again? How are missing/invalid-email failures bucketed and normalized? Are auth failures excluded?
-5. What errors/statuses apply to missing history email and invalid cursors, and what email/cursor normalization is allowed?
-6. Does reset clear limiter and idempotency state? This affects repeatable assessments and replay of deleted bookings.
+Approved 6 November 2026. These resolve gaps in the official source; they do not modify the official specification. Earlier **Unspecified** notes describe source omissions, resolved as follows where applicable.
 
-Additional schema omissions (unknown-field policy, field/key size limits, timestamp ties and exact error messages) are recorded for implementation decisions; no additional public restriction is adopted here.
+| Topic | Approved policy | Current state |
+| --- | --- | --- |
+| Reset success/errors | 200 with {}; invalid payloads and duplicate slot IDs return 400 without modifying existing state | Implemented. |
+| Reset lifecycle | Atomically clear bookings, slots, idempotency records and rate-limit attempts, then install submitted inventory | Implemented. |
+| Retry precedence | Matching idempotency keys replay the original response and changed bodies return 422 before rate limiting | Level 4/5 pending; these paths consume no new admission. |
+| Same-body identity | Canonicalized parsed JSON preserving submitted strings; object key order/JSON formatting do not matter | Level 4 pending. |
+| Response retention | Retain until reset; cache successful bookings and deterministic domain errors, not transient infrastructure failures or 429 | Level 4 pending. |
+| Limit algorithm | PostgreSQL rolling 60 seconds; count admitted attempts, including failed validation/business attempts when a usable email bucket exists | Level 5 pending. |
+| Rejected/email-less attempts | Denied 429 does not extend the window; missing/unusable email gets normal validation error without a shared bucket | Level 2/5 pending. |
+| History error policy | Missing email or malformed/foreign cursor returns 400 Error JSON | Level 4 pending. |
+| Started/occupied precedence | Return started-slot 400 before checking occupancy | Level 2/3 pending. |
+| Cancellation/history | Include cancelled bookings in history and allow cancellation after appointment start | Level 3/4 pending. |
+
+The official operation-status matrix remains unchanged. Additional policy-defined responses are reset 400 and history 400 for missing email/malformed/foreign cursors. Unexpected infrastructure failures currently use generic 500 {error: "internal server error"}; this is implementation handling, not an official declared status.
+
+Reset checks required object/array/string types and timezone-qualified date-time values, accepts past/empty inventories, ignores unknown properties, and adds no duration/end-after-start rule. Because PostgreSQL text cannot contain a NUL character, it is rejected as invalid input with 400. Exact error wording is implementation-defined; only the Error envelope is required.
+
+Remaining minor source omissions include key/field size limits, byte-exact timestamp spelling, unknown-field identity nuances, and stale but otherwise well-formed cursors. Do not add extra restrictions or endpoints while implementing a later level. None blocks Level 1's approved scope; full email validation, history and header handling must be reviewed/tested in their requested levels.

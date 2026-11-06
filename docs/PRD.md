@@ -41,7 +41,7 @@ The backend must enforce authentication, validation, concurrency safety, idempot
 | Database | PostgreSQL |
 | ORM | Drizzle ORM |
 | Validation | class-validator / class-transformer |
-| Frontend | React + TypeScript + Vite |
+| Frontend | Next.js + TypeScript with a server-side API proxy |
 | API testing | Jest + Supertest |
 | Local database | Docker |
 | API hosting | Render |
