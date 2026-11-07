@@ -1,6 +1,6 @@
 # Deployment and local infrastructure
 
-Updated 7 November 2026. Local PostgreSQL and backend Levels 1–3 have been configured. No API/frontend hosting, HTTPS deployment or Next.js proxy was implemented. Server-side API-key authentication and booking validation are implemented; the full assessment and hosted deployment remain incomplete.
+Updated 7 November 2026. Local PostgreSQL and backend Levels 1–4 have been configured. No API/frontend hosting, HTTPS deployment or Next.js proxy was implemented. Server-side API-key authentication and booking validation are implemented; the full assessment and hosted deployment remain incomplete.
 
 ## Local PostgreSQL
 
@@ -47,6 +47,14 @@ For the generated local configuration, set $env:DOTENV_CONFIG_PATH = '.env.level
 
 The Docker named volume survives docker compose down without -v. Integration tests verify database-backed state across requests and an application restart with a new pool. Container/host restart and hosted persistence checks remain later deployment tasks, not claimed as tested here.
 
-Render API, Neon PostgreSQL and Vercel Next.js frontend remain the PRD hosting plan. Levels 1–3 now pass local integration tests. Levels 4–5, the server-only frontend proxy and HTTPS/hosted integration checks remain later authorized work. All six official method/path combinations authenticate; cancellation is implemented while the history handler remains absent. Key rotation requires restart because the configured digest is captured at startup.
+Render API, Neon PostgreSQL and Vercel Next.js frontend remain the PRD hosting plan. Levels 1–5 are implemented locally; TESTING.md records verification. The server-only frontend proxy and HTTPS/hosted integration checks remain later authorized work. All six official method/path combinations authenticate; cancellation, durable idempotency and history pagination are implemented. Key rotation requires restart because the configured digest is captured at startup.
 
 Level 3 adds only transactional service/controller behaviour and tests. No environment variable, dependency, database schema/migration, index definition, deployment command or hosting configuration changed.
+
+Level 4 uses the existing database and migrations; no new dependency, environment variable, hosting resource or DDL was needed. API_KEY also derives a domain-separated cursor-signing key: all replicas serving one database must use the same key for cursor portability. Rotating it invalidates old history cursors (400; restart traversal), while the internal idempotency namespace/digests persist independently until reset. Retained response bodies contain patient information and need the same database access protection as bookings. Level 5 admission is implemented locally; no hosted deployment was performed.
+
+## Level 5 connection and retention considerations
+
+The primary node-postgres pool retains its default maximum 10 and 30-second connection timeout. Independent admission has a separate max-4 pool, UTC sessions, 30-second acquisition timeout, 15-second lock timeout and 20-second statement timeout. Budget up to 14 server connections per replica plus administration/migrations and avoid undersizing the shared server or introducing transaction-unsafe pooling. Admission errors/timeout fail closed with sanitized 500; no in-memory fallback exists. The inner transaction never reacquires reset protection already held by its parent.
+
+No new dependency, migration, environment variable or hosting resource was added. All instances need the same PostgreSQL writer. Admission events contain hashed email identities and remain until reset; production retention/cleanup and load/timeout sizing need operational review. Protect retained patient response snapshots and database access. PostgreSQL wall clock is authoritative; operate it consistently. No frontend or deployment work was started.

@@ -10,6 +10,7 @@ import {
   DatabaseService,
   type DatabaseTransaction,
 } from '../database/database.service';
+import { BookingRateLimitService } from './booking-rate-limit.service';
 import { RESET_LOCK } from '../database/locks';
 import { idempotencyRecords } from '../database/schema';
 
@@ -49,14 +50,23 @@ const lockNamespace = 410402;
 
 @Injectable()
 export class IdempotencyService {
-  constructor(private readonly database: DatabaseService) {}
+  constructor(
+    private readonly database: DatabaseService,
+    private readonly rateLimit: BookingRateLimitService,
+  ) {}
 
   async execute(
     key: string,
     body: unknown,
     perform: (tx: DatabaseTransaction) => Promise<BookingHttpResult>,
   ): Promise<BookingHttpResult> {
-    const hash = createHash('sha256').update(canonicalJson(body)).digest('hex');
+    let hash: string | undefined;
+    let canonicalError: unknown;
+    try {
+      hash = createHash('sha256').update(canonicalJson(body)).digest('hex');
+    } catch (error) {
+      canonicalError = error;
+    }
     // Fixed-size identity avoids B-tree entry-size limits for otherwise valid headers.
     const keyIdentity = createHash('sha256').update(key).digest('hex');
     const lock = createHash('sha256')
@@ -88,6 +98,8 @@ export class IdempotencyService {
             );
           return { status: stored.response_status, body: stored.response_body };
         }
+        await this.rateLimit.admit(body);
+        if (hash === undefined) throw canonicalError;
         let response: BookingHttpResult;
         try {
           // A nested transaction is a savepoint: recover from SQL failure before caching.

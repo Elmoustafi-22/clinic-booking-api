@@ -10,6 +10,7 @@ import { json, urlencoded } from 'express';
 import { ApiKeyGuard } from './auth/api-key.guard';
 import { ApiKeyMiddleware } from './auth/api-key.middleware';
 import { BookingsService } from './bookings/bookings.service';
+import { BookingRateLimitService } from './bookings/booking-rate-limit.service';
 import { IdempotencyService } from './bookings/idempotency.service';
 import { BookingValidationPipe } from './bookings/booking-validation.pipe';
 import { BookingHistoryService } from './bookings/booking-history.service';
@@ -27,6 +28,7 @@ import { SlotsService } from './slots/slots.service';
     SlotsService,
     BookingsService,
     IdempotencyService,
+    BookingRateLimitService,
     BookingValidationPipe,
     BookingHistoryService,
     BookingCursor,

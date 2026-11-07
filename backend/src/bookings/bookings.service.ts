@@ -18,6 +18,7 @@ import {
   IdempotencyService,
   type BookingHttpResult,
 } from './idempotency.service';
+import { BookingRateLimitService } from './booking-rate-limit.service';
 import { BookingValidationPipe } from './booking-validation.pipe';
 import { RESET_LOCK } from '../database/locks';
 import { bookings, slots } from '../database/schema';
@@ -48,25 +49,20 @@ export class BookingsService {
     private readonly clock: DatabaseClock,
     private readonly idempotency: IdempotencyService,
     private readonly validation: BookingValidationPipe,
+    private readonly rateLimit: BookingRateLimitService,
   ) {}
 
-  private async create(input: CreateBookingDto) {
-    try {
-      return await this.database.db.transaction(
-        async (tx) => {
-          await tx.execute(
-            sql`select pg_advisory_xact_lock_shared(${RESET_LOCK})`,
-          );
-          return this.insertBooking(tx, input);
-        },
-        { isolationLevel: 'read committed' },
-      );
-    } catch (error) {
-      // Drizzle has rolled back before this handler runs: never continue an aborted tx.
-      if (isConfirmedSlotConflict(error))
-        throw new ConflictException('slot already booked');
-      throw error;
-    }
+  private async create(body: unknown) {
+    return this.database.db.transaction(
+      async (tx) => {
+        await tx.execute(
+          sql`select pg_advisory_xact_lock_shared(${RESET_LOCK})`,
+        );
+        await this.rateLimit.admit(body);
+        return this.insertBooking(tx, this.validation.transform(body));
+      },
+      { isolationLevel: 'read committed' },
+    );
   }
 
   async book(
@@ -74,22 +70,15 @@ export class BookingsService {
     key: string | undefined,
   ): Promise<BookingHttpResult> {
     if (key === undefined) {
-      const booking = await this.create(this.validation.transform(body));
+      const booking = await this.create(body);
       return { status: 201, body: booking };
     }
     return this.idempotency.execute(key, body, async (tx) => {
-      try {
-        const booking = await this.insertBooking(
-          tx,
-          this.validation.transform(body),
-        );
-        return { status: 201, body: booking };
-      } catch (error) {
-        // The enclosing savepoint rolls back before the result is cached.
-        if (isConfirmedSlotConflict(error))
-          throw new ConflictException('slot already booked');
-        throw error;
-      }
+      const booking = await this.insertBooking(
+        tx,
+        this.validation.transform(body),
+      );
+      return { status: 201, body: booking };
     });
   }
 
@@ -123,17 +112,25 @@ export class BookingsService {
       )
       .limit(1);
     if (confirmed) throw new ConflictException('slot already booked');
-    const [booking] = await tx
-      .insert(bookings)
-      .values({
-        id: randomUUID(),
-        slot_id: slotId,
-        name,
-        email,
-        status: 'confirmed',
-      })
-      .returning(bookingFields);
-    return booking;
+    try {
+      const [booking] = await tx
+        .insert(bookings)
+        .values({
+          id: randomUUID(),
+          slot_id: slotId,
+          name,
+          email,
+          status: 'confirmed',
+        })
+        .returning(bookingFields);
+      return booking;
+    } catch (error) {
+      // Only this INSERT's named uniqueness violation is a booking conflict.
+      // The caller rolls back its transaction/savepoint before further SQL.
+      if (isConfirmedSlotConflict(error))
+        throw new ConflictException('slot already booked');
+      throw error;
+    }
   }
 
   async cancel(id: string) {

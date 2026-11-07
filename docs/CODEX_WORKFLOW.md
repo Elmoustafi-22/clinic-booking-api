@@ -1,5 +1,100 @@
 # Work log
 
+## 7 November 2026 — Level 5 PostgreSQL rolling rate limiting
+
+Status: **255/255 PostgreSQL integration tests passed, 6 suites**, including all 213 unchanged Level 1–4 cases and 42 new Level 5 cases. Jest reported 123.126 seconds. Production build, ESLint, formatting and Git whitespace checks passed. Stop after Level 5; no frontend, deployment or new public route was started.
+
+### Preparation and decisions
+
+Read root AGENTS.md, owner attachment, relevant API/architecture/database/testing documentation and the complete official OpenAPI source. Inspected booking/key/reset transactions and existing attempts/index schema. Preserved the already pending Level 4 documentation edits. Official PDF, migration SQL/metadata and package/lock files remain unchanged. No migration or dependency was necessary; schema.ts has a lifecycle-comment change only.
+
+BookingRateLimitService uses the existing booking_attempts table. Its email column stores SHA-256 of trim/lowercase string identity, including invalid nonblank string emails, rather than arbitrary raw invalid text. Missing/blank/non-string email values create no shared bucket. PostgreSQL clock_timestamp after the per-email transaction advisory lock is authoritative, preserving full precision. Within READ COMMITTED, count (now-60 seconds, now], insert one event only below five, and commit independently before full DTO/slot work. Denial returns 429 error-only JSON plus positive ceil Retry-After, with no event mutation, booking write or result cache.
+
+Parent lock order is shared reset -> optional idempotency key -> independent email admission -> validation/savepoint -> slot -> booking/result commit. Admission has only its email lock (two-integer namespace 410403); it never reacquires reset/key/slot or requests a primary connection. Shared reset stays held by the parent across the separate event commit. Thus reset cannot erase an event between admission and booking; queued reset cannot form a parent/child reset-lock cycle. Existing confirmed-slot partial unique index and cancellation protocol remain intact.
+
+A separate max-4 admission pool avoids primary pool exhaustion from parents borrowing another client from their own pool. Primary max remains default 10; budget up to 14 connections per replica. Both pools have a bounded 30-second connection wait; admission has 15-second lock and 20-second statement timeouts. Admission/commit failures fail closed with sanitized 500. A later booking or response-write rollback cannot undo its committed attempt. No process-local counter/mutex, extra database function, background worker or retry fallback was added.
+
+Replay and mismatch lookup occur before admission; new key ownership remains held across the admission commit, so simultaneous matching retries charge once. Admission is outside the cacheable-domain-error handler: 429 and infrastructure failures are uncached, while booking/result persistence retains existing atomicity. New unfingerprintable parsed JSON with usable email consumes admission then returns uncached 400; a changed existing-key body still returns 422 first. Authentication/parser errors remain earlier. Expected named slot-index mapping is scoped to booking INSERT, avoiding unrelated limiter failures being mislabeled 409.
+
+### Actual results and problems
+
+Final complete run: 255 passed / 0 failed / 6 suites in 123.126 seconds. Suite counts: 32 Level 1, 84 Level 2, 27 Level 3, 28 idempotency, 42 pagination and 42 rate limiting. No earlier test file was changed. New coverage includes 24 simultaneous requests in one/two apps with exactly five successful admissions, 20 keyed cross-instance retries charging once, error counting, clock/expiry precision, denied immutability, independent emails, booking/result/admission/deferred-commit/clock failure, failed-budget exhaustion and reset rollback/lock coordination. TESTING.md records commands and limitations.
+
+Initial new-suite verification found one burst 500 (38/39); a targeted rerun passed but complete testing reproduced both bursts (250/252). Longer bounded connection/lock waits resolved the observed burst failures. The 39-case new suite then passed; three stronger fault/rollback cases were added before the final 255-case passing run. Initial build type inference required explicitly declaring NodePgDatabase on the new service. A Python launcher was unavailable; repository edits used installed Node/PowerShell tooling instead. No secret was printed or existing environment file overwritten.
+
+Production build, ESLint src/test/drizzle.config.ts, Prettier source/test/config checks and Git whitespace checks passed with exit 0. Initial lint flagged a redundant assertion and method-binding issues in optional test diagnostics; removed the redundant spy without changing status/database-state assertions. No dependencies changed/audit rerun; existing findings remain the last measured security baseline.
+
+After the test-diagnostic lint cleanup, both affected 24-request concurrency cases passed again (2/2; 40 unrelated cases skipped), 18.841 seconds. Final direct local ESLint and Prettier checks also exited 0; Git whitespace checks reported no errors for tracked or newly created files.
+
+### Incremental files
+
+Created: backend/src/bookings/booking-rate-limit.service.ts; backend/test/rate-limit.e2e-spec.ts.
+
+Modified: backend/src/app.module.ts (provider), backend/src/bookings/bookings.service.ts (admission before validation, insert-scoped conflict mapping), backend/src/bookings/idempotency.service.ts (replay-first admission), backend/src/common/api-error.filter.ts (Retry-After), backend/src/database/database.service.ts (bounded burst acquisition wait), backend/src/database/schema.ts (comment only). Documentation: docs/API.md, ARCHITECTURE.md, DATABASE.md, TESTING.md, CODEX_WORKFLOW.md, DEPLOYMENT.md and backend/README.md. No files removed.
+
+### Remaining risks and authorization boundary
+
+No unresolved source ambiguity blocks this approved Level 5 policy. Events/results remain until reset and contain patient-related identities/snapshots; access control and retention need operational review. Hashes are identities, not encryption. All replicas require the same PostgreSQL writer and lock namespaces. Connection budgets, external lock holders, conservative ambiguous-commit counting, database-clock administration, hosted load/timeout sizing and primary transaction timeout policy remain deployment concerns. Previous dependency findings were not remediated. Frontend/proxy and deployment require separate authorization; no external assessment result is claimed.
+
+## 7 November 2026 — Level 4 durable idempotency and cursor history
+
+Status: **Levels 1–4 locally verified: 5 PostgreSQL integration suites, 213 passed, 0 failed.** Earlier suites retain 32/84/27 passing cases (143 total); Level 4 adds 28 idempotency and 42 pagination cases. Build, ESLint and formatting checks passed. Stop after Level 4; no Level 5/frontend implementation or external assessor result is claimed.
+
+### Preparation and scope
+
+- Read the attached Level 4 request, AGENTS.md, API/architecture/database/testing documentation, complete previously retrieved official OpenAPI and current controller/services/schema/test infrastructure. Checked Git status: the Level 3 baseline was clean at task start.
+- Recorded schema, migration/metadata, dependency and official PDF fingerprints. Reused the existing idempotency table, composite key, history index, confirmed-slot partial unique index, reset coordination, PostgreSQL pool, DTO validation and Level 3 row-locking logic. Reviewed official Drizzle nested-transaction/savepoint and PostgreSQL locking/formatting guidance.
+
+### Implementation decisions and transaction boundaries
+
+- Added IdempotencyService with stable internal clinic-api / POST /bookings scope. Header identity is SHA-256 hex stored in the existing key column; this avoids large B-tree entry limits without introducing a public header-length rule. Request identity is a separate SHA-256 over canonical parsed JSON: recursively sorted object keys, array order/types and submitted strings preserved, including unknown/special own keys. JSON formatting/object order is ignored; storage normalization does not change request equivalence.
+- A present empty key is supported because the official string header has no minLength. Malformed/absent JSON and unsupported/non-finite JSON values cannot be fingerprinted and remain uncached errors. No API secret/raw key is persisted in scoped-key identity fields.
+- API authentication remains before parsing/idempotency/validation. Moved full keyed DTO processing behind stored-result lookup; no-header requests retain prior validation/creation. Controller delegates and applies the returned original HTTP status with passthrough response handling, without exposing internal wrappers or metadata.
+- Keyed READ COMMITTED outer transaction: shared reset advisory lock -> two-integer transaction advisory key in namespace 410402 -> re-read scoped persisted state -> savepoint containing validation and existing slot-lock/start/occupancy/insertion -> store original response status/JSONB snapshot -> commit. Two-integer advisory keys are disjoint from the one-bigint reset keyspace. Lock hashes can serialize unrelated keys but full scoped digest identity determines record equality.
+- Same key/fingerprint replays the stored response/booking ID; a changed body returns 422 before revalidation and preserves the original. Booking and successful result commit atomically; failed response storage rolls back the booking too. A nested savepoint rolls back actual SQL failure before deterministic error storage, retaining outer reset/key ownership. Cache 201 plus deterministic DTO/business 400/404/409; do not newly cache parser/auth, mismatch 422, transient/infrastructure failures or future 429. No pending row, expiry job, session lock or memory correctness mutex.
+- Records survive restart and cancellation until reset. Replaying after cancellation returns the original confirmed JSON while lookup returns current cancelled state. The existing reset transaction already clears response records with inventory, preventing replay of an old stored record after reset. Error snapshots may legitimately exist without a booking; no new FK is appropriate.
+- Added BookingHistoryService and BookingCursor for the existing GET /bookings route. Require nonblank string email, normalize case/outer whitespace without inventing GET email-syntax validation. Default limit 10; integer decimal digits 1–50; invalid/repeated parameters and malformed/foreign cursor return 400. Return both statuses in exactly the bookings/next_cursor envelope and six-field Booking shape.
+- History seeks by immutable (created_at, id) ascending, fetches limit+1 and returns a continuation only if another row exists. PostgreSQL emits a separate full-six-digit UTC position string; cursor decoding passes it directly to timestamptz in the tuple predicate without JavaScript Date truncation. Public timestamp serialization is unchanged. Equal timestamps and sub-millisecond ordering are supported without offsets or a lookup of the boundary row.
+- Opaque versioned base64url payload/signature includes normalized email, exact timestamp and ID. HMAC-SHA-256 uses a domain-separated key derived from existing server API_KEY; constant-time signature, canonical encoding, version, context, calendar and safe text-ID checks precede SQL. Replicas share verification with the same API_KEY. Tokens are integrity-protected rather than encrypted; key rotation invalidates old tokens while idempotency scope persists independently. Pagination is live, not a frozen snapshot across writes/reset.
+
+### Verification, problems and actual results
+
+- Initial complete run: **210 tests passed** (previous 143 + 27 idempotency + 40 pagination), 5 suites, 61.739 seconds. Initial lint found four unused variables after extracting common booking logic/projection; removed them before the final passing check. No rule suppression or functional-test failure occurred.
+- Review addressed the physical index-size concern by storing fixed-size header-key identities and added strict decoded cursor date/text validation. Added a 4000-character random-key test plus two signed malformed-cursor cases. Final npm test -- --json --outputFile <temporary report>: **213 passed / 0 failed / 5 suites, 104.766 seconds**. Report confirms prior suites 32/84/27, idempotency 28 and pagination 42.
+- Idempotency cases cover canonical body distinctions/reordering, original status/body/ID, absent/empty/long keys, concurrent identical/mixed bodies, two independent Nest instances/pools, different-key slot competition, cancellation/restart replay, deterministic error retention, transient failure, response-store rollback, actual uniqueness-savepoint recovery, reset clearing and authentication precedence.
+- History cases cover email/query validation, default/boundary/invalid limits, empty/final pages, no gaps/duplicates on unchanged data, both statuses, case-insensitive matching, equal timestamps, reversed-ID microsecond positions, malformed/foreign/tampered/signed-invalid tokens, cross-instance continuation and deleted boundary rows.
+- All 143 previous cases still pass. The two prior history-absence staging expectations were updated for the newly authorized route: missing email is now 400 (was routing 404), and authenticated valid-email history is 200 (was routing 404). No previous test case or other functional assertion was removed.
+- Final production build, ESLint src/test/drizzle.config.ts and Prettier source/test/config checks exited 0. Final Git whitespace checks passed. Tests use actual listening localhost Nest servers, Promise.all HTTP concurrency and Docker PostgreSQL 18.6; no in-memory database or mocked query result. Temporary fault triggers are removed in finally; apps/pools close.
+- No dependency installation or audit rerun. Migration artifacts, package manifests/lock and official PDF fingerprints remain unchanged. schema.ts has one lifecycle-comment update only; restoring that comment reproduces its baseline fingerprint, proving SQL definitions did not change. No DDL or new migration was necessary.
+
+### Incremental file inventory
+
+Created:
+
+- backend/src/bookings/idempotency.service.ts
+- backend/src/bookings/booking-history.service.ts
+- backend/src/bookings/booking-cursor.ts
+- backend/test/idempotency.e2e-spec.ts
+- backend/test/pagination.e2e-spec.ts
+
+Modified:
+
+- backend/src/bookings/bookings.service.ts — shared transaction-aware insertion, keyed orchestration and service-invoked validation; cancellation preserved.
+- backend/src/app.controller.ts and backend/src/app.module.ts — existing history route, optional header/original status mapping and provider wiring.
+- backend/src/database/database.service.ts — compile-time transaction type export only.
+- backend/src/database/schema.ts and backend/src/auth/api-key.middleware.ts — lifecycle comments only; schema/auth behaviour unchanged.
+- backend/test/app.e2e-spec.ts and backend/test/level2.e2e-spec.ts — history staging expectations for the newly implemented route.
+- docs/API.md, docs/ARCHITECTURE.md, docs/DATABASE.md, docs/TESTING.md and docs/CODEX_WORKFLOW.md.
+- backend/README.md and docs/DEPLOYMENT.md — stage/cursor-key operational documentation.
+
+No files removed. No new public endpoint, DDL/migration, dependency, secret/environment-variable, frontend, PRD or official specification change. Existing developer .env was not overwritten.
+
+### Remaining risks and Level 5 prerequisites
+
+No unresolved issue blocks the local Level 4 acceptance scope. Retention is unbounded until reset by approved policy; response snapshots contain patient data and require database protection. Cursor clients must restart traversal after key rotation/reset; live pagination does not guarantee a snapshot while data changes. External lock holders/production timeouts, hosted load/persistence, external Koya assessment and earlier dependency-audit findings remain separate work.
+
+Level 5 needs independently committed PostgreSQL rolling-60-second admission for usable emails, after matching replay/422 and before full validation/business work. Denied 429 must neither add attempts nor be cached. Preserve outer reset/key ownership across admission without reacquiring reset inside an independently committed connection behind a waiting reset; reserve/bound pool capacity to avoid starvation. Adjust both current keyed and unkeyed validation paths deliberately for admitted-failure counting. No limiter, attempt writes or frontend work was implemented. Await explicit Level 5 authorization.
+
 ## 7 November 2026 — Level 3 concurrency safety and cancellation
 
 Status: **Levels 1–3 locally verified: 3 PostgreSQL integration suites, 143 passed, 0 failed.** Level 1: 32/32; Level 2: 84/84; Level 3: 27/27. Production build, ESLint and formatting checks passed. Stop after Level 3; no Level 4/5 implementation or authorization is implied. This entry supersedes earlier Level 2-only status statements below.

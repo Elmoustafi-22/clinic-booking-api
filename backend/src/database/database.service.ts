@@ -14,7 +14,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     this.pool = new Pool({
       connectionString,
       options: '-c timezone=UTC',
-      connectionTimeoutMillis: 5000,
+      // Booking parents retain a client during independent admission; allow a
+      // bounded queue for bursts beyond the default ten-client pool capacity.
+      connectionTimeoutMillis: 30000,
     });
     this.db = drizzle(this.pool, { schema });
   }

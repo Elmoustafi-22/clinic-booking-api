@@ -4,6 +4,7 @@ import {
   ExceptionFilter,
   HttpException,
 } from '@nestjs/common';
+import { BookingRateLimitException } from '../bookings/booking-rate-limit.service';
 import type { Response } from 'express';
 
 @Catch()
@@ -16,6 +17,8 @@ export class ApiErrorFilter implements ExceptionFilter {
       exception instanceof HttpException
         ? exception.message
         : 'internal server error';
+    if (exception instanceof BookingRateLimitException)
+      response.setHeader('Retry-After', String(exception.retryAfter));
     // Never serialize database errors, request bodies or connection strings.
     response.status(status).json({ error: message });
   }

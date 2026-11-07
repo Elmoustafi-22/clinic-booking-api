@@ -1,6 +1,90 @@
-# Testing — Levels 1–3
+# Testing — Levels 1–5
 
-Updated 7 November 2026. **Levels 1–3 locally verified: 3 PostgreSQL integration suites, 143 passed, 0 failed.** Level 1 retains 32 passing tests, Level 2 retains 84, and Level 3 adds 27. No external Koya assessor or hosted deployment was run.
+## Level 5 final verification — 7 November 2026
+
+**Levels 1–5 locally verified: 6 PostgreSQL integration suites, 255 passed, 0 failed.** Existing suites retain all 213 cases unchanged: Level 1 32/32, Level 2 84/84, Level 3 27/27, Level 4 28/28 idempotency and 42/42 pagination. Level 5 adds 42/42. No existing test file was modified for Level 5.
+
+| Check | Actual result |
+| --- | --- |
+| npm test -- --json --outputFile <temporary report> | Exit 0: 255/255 passed, 6 suites; Jest reported 123.126 seconds. |
+| New test/rate-limit.e2e-spec.ts | 42/42 passed with real PostgreSQL and listening Nest HTTP applications. |
+| npm run build | Passed, exit 0. |
+| npm exec -- eslint src test drizzle.config.ts | Passed, exit 0 after test-helper lint cleanup. |
+| npm exec -- prettier --check src test drizzle.config.ts package.json tsconfig.build.json | Passed, exit 0. |
+| git diff --check | Passed, exit 0 (also checked with line-ending conversion disabled). |
+| Migration/package/specification fingerprints | Existing migration SQL/metadata, package/lock files and official PDF unchanged. schema.ts diff is a comment only. |
+
+Coverage includes five admissions/sixth 429 and positive integer Retry-After; independent/normalized emails; counted invalid name, missing slot, missing/occupied/started slot, invalid syntax and oversized/NUL email strings; absent/blank/non-string email without a bucket; authentication first; database timestamps; expired history; calendar-minute crossing; exact microsecond 60-second expiry and ceil rounding; denied state immutability.
+
+Two burst cases send 24 simultaneous distinct-slot requests with one email, through one or two independent Nest applications. Each asserts five 201, nineteen 429, no unexpected 500 response, five admitted events and five bookings directly in PostgreSQL. Twenty concurrent identical keyed requests across two applications consume one event and retain one response/booking. Replay and mismatched-body 422 bypass a full bucket; new keys consume quota, cached validation retries consume once, and a denied key is reusable after expiry with no cached 429.
+
+Fault triggers prove booking and response-store rollbacks retain admission, admission insert/clock-query/deferred-COMMIT failure fails closed, and no booking/result pair is orphaned. A failed booking followed by four healthy bookings exhausts the budget, proving the failed transaction still counts. Reset clears admission and permits new attempts; invalid reset preserves it, and failed inventory insertion rolls back all tables. A PostgreSQL gate holds one admission while another email succeeds. A second gate test queues exclusive reset behind the parent's shared lock before releasing the child, proving the child does not deadlock by reacquiring reset and final reset clears the completed attempt/booking together. Fault fixtures are removed in finally and applications/pools close.
+
+The first new-suite run passed 38/39 with one unexpected 500 in a burst. A targeted burst rerun passed, but the initial complete run reproduced both burst failures (250/252 passed); all 213 legacy cases passed. Bounded connection/lock waits were then increased for burst queues (primary/admission connection wait 30 seconds; admission lock 15 seconds, statement 20 seconds). The 39-case Level 5 suite passed in 37.189 seconds. Three additional clock/rollback/reset cases brought the final full run to 255/255. Initial ESLint flagged a redundant assertion and method-binding issues in optional test diagnostics; the redundant spy was removed, retaining every status/database-state assertion. An initial production build also caught a missing explicit NodePgDatabase type on the new service; it was corrected before passing integration execution.
+
+No dependency was installed or updated and no security audit was rerun. Earlier audit findings below remain the last measured baseline; no new dependency finding is claimed. These are local acceptance results, not hosted load, availability, external assessment or frontend verification. Resource overload and external lock holders can still produce fail-closed 500 responses after bounded waits. Events are retained until reset; no expiry cleanup job exists.
+
+After the test-diagnostic lint cleanup, both affected 24-request concurrency cases passed again (2/2; 40 unrelated cases skipped), 18.841 seconds. Final direct local ESLint and Prettier checks also exited 0; Git whitespace checks reported no errors for tracked or newly created files.
+
+## Historical Level 4 verification
+
+Updated 7 November 2026. **Levels 1–4 locally verified: 5 PostgreSQL integration suites, 213 passed, 0 failed.** Level 1: 32; Level 2: 84; Level 3: 27; Level 4: 70 (28 idempotency, 42 pagination). No external Koya assessor, hosted deployment or frontend was run.
+
+## Level 4 final executed checks
+
+| Check | Actual result |
+| --- | --- |
+| npm test -- --json --outputFile <temporary report> | Exit 0: 5 suites / 213 tests passed, 0 failed; Jest reported 104.766 seconds. |
+| Previous Level 1–3 suites | 32/32, 84/84 and 27/27 passed, retaining all 143 cases. |
+| test/idempotency.e2e-spec.ts | 28/28 passed. |
+| test/pagination.e2e-spec.ts | 42/42 passed. |
+| npm run build | Passed, exit 0. |
+| npm exec -- eslint src test drizzle.config.ts | Passed, exit 0, no warnings/errors. |
+| npm exec -- prettier --check src test drizzle.config.ts package.json tsconfig.build.json | Passed, exit 0. |
+| git diff --check | Passed after final documentation review. |
+| Migration/dependency/specification fingerprints | Unchanged. schema.ts differs only in a lifecycle comment; restoring that comment reproduces the task-start fingerprint. No DDL/migration was generated. |
+
+The first complete Level 4 run passed 210 tests (27 idempotency/40 pagination plus previous 143). Review then added fixed-size header-key identity storage and strict decoded cursor date/text validation. Final coverage added three tests and passed all 213. No functional integration-test failure was observed. Initial ESLint found four unused variables after extracting shared booking logic/projection; they were removed before the final passing check. This was a lint cleanup, not a suppressed rule.
+
+## Existing-suite compatibility
+
+All 143 previous cases remain and pass. Two history-absence staging assertions necessarily changed when GET /bookings was implemented: the Level 1 missing-email request now expects the approved 400 instead of routing 404, and Level 2's authenticated valid-email request expects 200 instead of 404. Authentication/validation/reset/availability/lookup/cancellation/concurrency assertions were retained. No previous test case was removed or weakened to mask a regression.
+
+## Idempotency coverage — 28 tests
+
+- Original status, booking ID and full six-field JSON are replayed; PostgreSQL holds the status/body snapshot and public responses contain no metadata.
+- Canonical recursive property order, arrays, number/string distinctions, special own JSON keys, submitted whitespace/case and extra fields are tested. Changed bodies, including invalid changed bodies, return 422 while the original remains replayable.
+- No-header requests independently book valid different slots. A present empty key works; a 4000-character random header key works without exceeding B-tree entry size because stored identity is SHA-256.
+- Sixteen identical simultaneous HTTP requests replay one result. Twelve matching requests across two independent Nest instances/pools also return one ID. Mixed-body simultaneous requests yield one original result plus 422 mismatches. Twelve different keys competing for a slot create one confirmed booking and cache independent occupied-slot outcomes.
+- Original confirmed responses replay after cancellation; current lookup remains cancelled. Replay also survives an application close/recreation with a fresh pool.
+- Deterministic 400 validation/start, 404 missing-slot and 409 occupied-slot results replay even after the underlying slot/booking state changes.
+- A response-store trigger failure rolls back the newly created booking and leaves no metadata; retry succeeds after cleanup. A transient booking error is not cached. A real unique-index violation rolls back to the savepoint, then commits/replays its 409 without aborted-transaction errors or trigger-written booking residue.
+- Reset clears old records atomically and permits key reuse with another body/new booking ID. Missing API credentials take precedence over replay, mismatch and validation, without metadata mutation.
+
+## Pagination coverage — 42 tests
+
+- Missing/blank/repeated email is 400; empty history has exact bookings/next_cursor envelope. GET does not invent POST email-syntax rules.
+- Default page size 10, valid limits 1/50, invalid/fractional/nonnumeric/empty/repeated limits and a multi-page unchanged dataset are checked. All expected IDs appear once in database order; final cursors are null.
+- Case-insensitive/trimmed email matches and email isolation work. Both booking statuses remain visible, including a record cancelled through the actual API. Every result contains only six public Booking fields.
+- Equal timestamps use the ID tie-breaker. A deliberately reversed-ID dataset with three distinct microsecond timestamps inside one visible millisecond traverses correctly, detecting any truncation of cursor boundaries.
+- Malformed/repeated/foreign/tampered cursors are 400. Signed but impossible calendar dates and invalid PostgreSQL text IDs are rejected before SQL. Email case and page-size changes preserve valid continuation.
+- Another Nest instance accepts a generated cursor; a valid cursor does not depend on the boundary row remaining present. API authentication precedes query validation.
+
+## Reproduction, isolation and limits
+
+Use the existing Docker PostgreSQL 18.6 and dedicated TEST_DATABASE_URL ending _test. Both new suites listen on ephemeral localhost ports and issue actual HTTP requests with runtime-generated API keys; parallel cases use Promise.all, not sequential simulation or process mutexes. Existing migration files are applied/reapplied by suite setup. Test-only triggers are removed in finally and all applications/pools close; no production schema or credentials are modified.
+
+Run npm test from backend. Test JSON/advisory/fingerprint reports are temporary, not source artifacts. No new dependency was added, no audit was rerun, and the prior Level 2 audit findings below remain the last measured security baseline. No hosted load/availability benchmark or external assessment was performed.
+
+Pagination guarantees complete traversal for an unchanged dataset, not a frozen snapshot during writes/reset. Cursor signing requires the same API_KEY across replicas; rotating it invalidates old tokens. Error snapshots may legitimately have no booking. Retention remains until reset. HTTP transport/body limits and external PostgreSQL lock holders/timeouts remain deployment constraints.
+
+## Historical Level 4 prerequisites (now implemented)
+
+No rate-limit service, admission or attempt writes were implemented. Add independently committed PostgreSQL rolling-60-second admitted attempts after replay/422 resolution and before validation/business work when an email bucket is usable; denied 429 must neither extend the window nor be cached. Preserve reset/key coordination across admission and avoid inner reset-lock acquisition/pool starvation. Both keyed and unkeyed validation paths need deliberate integration with that future policy. Previous dependency audit remediation, frontend/proxy and deployment remain separate work.
+
+## Historical Level 1–3 verification (superseded stage boundary)
+
+The following records describe the previous Level 3 task, not the current implementation boundary.
 
 ## Final executed checks
 

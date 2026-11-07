@@ -73,7 +73,7 @@ export const bookings = pgTable(
   ],
 );
 
-// Durable idempotency state; rate-limit request handling remains deferred.
+// Durable idempotency state; admission events are stored in bookingAttempts below.
 export const idempotencyRecords = pgTable(
   'idempotency_records',
   {
