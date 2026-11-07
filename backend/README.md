@@ -1,6 +1,6 @@
 # Backend — Koya Clinic Booking API
 
-Backend foundation and Levels 1–3 are implemented. See ../docs/API.md for the target contract and current implementation boundary, and ../docs/TESTING.md for executed checks. API-key authentication and booking validation are implemented; Levels 4–5, the frontend proxy and hosted deployment remain deferred.
+Backend foundation and Levels 1–4 are implemented. See ../docs/API.md for the target contract and current implementation boundary, and ../docs/TESTING.md for executed checks. API-key authentication and booking validation are implemented; Level 5, the frontend proxy and hosted deployment remain deferred.
 
 ## Local setup
 
@@ -32,4 +32,4 @@ Edit src/database/schema.ts, run npm run db:generate, review and commit generate
 
 The named Docker volume persists database storage across container recreation. docker compose down preserves it; do not add -v unless deliberately deleting local data. PostgreSQL binds to localhost:5433 by default. PORT defaults to 3000; the example sets 3001 to avoid the frontend port.
 
-All five implemented endpoints require X-API-Key, including DELETE /bookings/{id}. Cancellation retains records and permits rebooking; same-slot conflicts return 409 through PostgreSQL row locks and the existing partial unique index. Authentication also covers GET /bookings history, which still returns 404 until Level 4 is authorized. Application factories must use bodyParser: false so the module's authentication middleware executes before JSON parsing. See docs/API.md for the complete target contract.
+All six official operations require X-API-Key, including DELETE /bookings/{id} and GET /bookings history. Cancellation retains records and permits rebooking; same-slot conflicts return 409 through PostgreSQL row locks and the existing partial unique index. POST /bookings optionally supports Idempotency-Key with durable original-response replay and 422 for changed bodies. GET /bookings requires email, supports limit/cursor and returns bookings/next_cursor. Cursor signing uses the existing server API_KEY, which must match across replicas; rotation invalidates older cursors. Idempotency records remain until reset. Application factories must use bodyParser: false so the module's authentication middleware executes before JSON parsing. See docs/API.md for the complete target contract.

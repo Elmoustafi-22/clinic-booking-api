@@ -10,6 +10,10 @@ import { json, urlencoded } from 'express';
 import { ApiKeyGuard } from './auth/api-key.guard';
 import { ApiKeyMiddleware } from './auth/api-key.middleware';
 import { BookingsService } from './bookings/bookings.service';
+import { IdempotencyService } from './bookings/idempotency.service';
+import { BookingValidationPipe } from './bookings/booking-validation.pipe';
+import { BookingHistoryService } from './bookings/booking-history.service';
+import { BookingCursor } from './bookings/booking-cursor';
 import { ApiErrorFilter } from './common/api-error.filter';
 import { DatabaseModule } from './database/database.module';
 import { ResetService } from './reset/reset.service';
@@ -22,6 +26,10 @@ import { SlotsService } from './slots/slots.service';
     ResetService,
     SlotsService,
     BookingsService,
+    IdempotencyService,
+    BookingValidationPipe,
+    BookingHistoryService,
+    BookingCursor,
     ApiKeyGuard,
     { provide: APP_GUARD, useExisting: ApiKeyGuard },
     { provide: APP_FILTER, useClass: ApiErrorFilter },

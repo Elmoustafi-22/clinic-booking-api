@@ -70,7 +70,7 @@ describe('Level 2 — real PostgreSQL integration', () => {
     {
       method: 'get' as const,
       path: '/bookings?email=ada@example.com',
-      success: 404,
+      success: 200,
     },
     { method: 'delete' as const, path: '/bookings/unknown', success: 404 },
   ];

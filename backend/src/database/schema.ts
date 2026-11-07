@@ -73,7 +73,7 @@ export const bookings = pgTable(
   ],
 );
 
-// Foundation only: handlers for idempotency and rate limiting are deferred.
+// Durable idempotency state; rate-limit request handling remains deferred.
 export const idempotencyRecords = pgTable(
   'idempotency_records',
   {

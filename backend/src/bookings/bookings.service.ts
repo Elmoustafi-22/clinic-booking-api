@@ -10,7 +10,15 @@ import { DatabaseError } from 'pg';
 import { stringInput } from '../common/input';
 import { CreateBookingDto } from './create-booking.dto';
 import { DatabaseClock } from '../database/database-clock';
-import { DatabaseService } from '../database/database.service';
+import {
+  DatabaseService,
+  type DatabaseTransaction,
+} from '../database/database.service';
+import {
+  IdempotencyService,
+  type BookingHttpResult,
+} from './idempotency.service';
+import { BookingValidationPipe } from './booking-validation.pipe';
 import { RESET_LOCK } from '../database/locks';
 import { bookings, slots } from '../database/schema';
 
@@ -38,55 +46,18 @@ export class BookingsService {
   constructor(
     private readonly database: DatabaseService,
     private readonly clock: DatabaseClock,
+    private readonly idempotency: IdempotencyService,
+    private readonly validation: BookingValidationPipe,
   ) {}
 
-  async create(input: CreateBookingDto) {
-    const slotId = stringInput(input.slot_id, 'slot_id');
-    const name = stringInput(input.name, 'name').trim();
-    const email = stringInput(input.email, 'email').trim().toLowerCase();
+  private async create(input: CreateBookingDto) {
     try {
       return await this.database.db.transaction(
         async (tx) => {
           await tx.execute(
             sql`select pg_advisory_xact_lock_shared(${RESET_LOCK})`,
           );
-          const [slot] = await tx
-            .select({ id: slots.id })
-            .from(slots)
-            .where(eq(slots.id, slotId))
-            .for('update');
-          if (!slot) throw new NotFoundException('slot not found');
-          // A separate statement ensures time is evaluated AFTER any row-lock wait.
-          const [eligibility] = await tx
-            .select({
-              started: sql<boolean>`${slots.start} <= ${this.clock.now()}`,
-            })
-            .from(slots)
-            .where(eq(slots.id, slotId));
-          if (eligibility.started)
-            throw new BadRequestException('slot has already started');
-          const [confirmed] = await tx
-            .select({ id: bookings.id })
-            .from(bookings)
-            .where(
-              and(
-                eq(bookings.slot_id, slotId),
-                eq(bookings.status, 'confirmed'),
-              ),
-            )
-            .limit(1);
-          if (confirmed) throw new ConflictException('slot already booked');
-          const [booking] = await tx
-            .insert(bookings)
-            .values({
-              id: randomUUID(),
-              slot_id: slotId,
-              name,
-              email,
-              status: 'confirmed',
-            })
-            .returning(bookingFields);
-          return booking;
+          return this.insertBooking(tx, input);
         },
         { isolationLevel: 'read committed' },
       );
@@ -96,6 +67,73 @@ export class BookingsService {
         throw new ConflictException('slot already booked');
       throw error;
     }
+  }
+
+  async book(
+    body: unknown,
+    key: string | undefined,
+  ): Promise<BookingHttpResult> {
+    if (key === undefined) {
+      const booking = await this.create(this.validation.transform(body));
+      return { status: 201, body: booking };
+    }
+    return this.idempotency.execute(key, body, async (tx) => {
+      try {
+        const booking = await this.insertBooking(
+          tx,
+          this.validation.transform(body),
+        );
+        return { status: 201, body: booking };
+      } catch (error) {
+        // The enclosing savepoint rolls back before the result is cached.
+        if (isConfirmedSlotConflict(error))
+          throw new ConflictException('slot already booked');
+        throw error;
+      }
+    });
+  }
+
+  private async insertBooking(
+    tx: DatabaseTransaction,
+    input: CreateBookingDto,
+  ) {
+    const slotId = stringInput(input.slot_id, 'slot_id');
+    const name = stringInput(input.name, 'name').trim();
+    const email = stringInput(input.email, 'email').trim().toLowerCase();
+    const [slot] = await tx
+      .select({ id: slots.id })
+      .from(slots)
+      .where(eq(slots.id, slotId))
+      .for('update');
+    if (!slot) throw new NotFoundException('slot not found');
+    // A separate statement ensures time is evaluated AFTER any row-lock wait.
+    const [eligibility] = await tx
+      .select({
+        started: sql<boolean>`${slots.start} <= ${this.clock.now()}`,
+      })
+      .from(slots)
+      .where(eq(slots.id, slotId));
+    if (eligibility.started)
+      throw new BadRequestException('slot has already started');
+    const [confirmed] = await tx
+      .select({ id: bookings.id })
+      .from(bookings)
+      .where(
+        and(eq(bookings.slot_id, slotId), eq(bookings.status, 'confirmed')),
+      )
+      .limit(1);
+    if (confirmed) throw new ConflictException('slot already booked');
+    const [booking] = await tx
+      .insert(bookings)
+      .values({
+        id: randomUUID(),
+        slot_id: slotId,
+        name,
+        email,
+        status: 'confirmed',
+      })
+      .returning(bookingFields);
+    return booking;
   }
 
   async cancel(id: string) {

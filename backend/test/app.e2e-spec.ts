@@ -414,11 +414,13 @@ describe('Level 1 — real PostgreSQL integration', () => {
     expect(index.rows[0].indexdef).toMatch(/WHERE .*status.*confirmed/);
   });
 
-  it('does not expose the scaffold root/history and returns 404 for an unknown cancellation ID', async () => {
-    for (const path of ['/', '/bookings']) {
+  it('keeps the scaffold root absent, requires a history email and returns 404 for an unknown cancellation ID', async () => {
+    for (const path of ['/']) {
       const response = await authenticated(app).get(path).expect(404);
       expect(response.body).toEqual({ error: expect.any(String) as unknown });
     }
+    const history = await authenticated(app).get('/bookings').expect(400);
+    expect(history.body).toEqual({ error: expect.any(String) as unknown });
     const response = await authenticated(app)
       .delete('/bookings/absent')
       .expect(404);

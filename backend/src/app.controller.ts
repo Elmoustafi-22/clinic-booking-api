@@ -4,15 +4,17 @@ import {
   Delete,
   Get,
   HttpCode,
+  Headers,
   Param,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
 import { BookingsService } from './bookings/bookings.service';
 import { ResetService } from './reset/reset.service';
 import { SlotsService } from './slots/slots.service';
-import { CreateBookingDto } from './bookings/create-booking.dto';
-import { BookingValidationPipe } from './bookings/booking-validation.pipe';
+import type { Response } from 'express';
+import { BookingHistoryService } from './bookings/booking-history.service';
 
 @Controller()
 export class AppController {
@@ -20,6 +22,7 @@ export class AppController {
     private readonly resetService: ResetService,
     private readonly slotsService: SlotsService,
     private readonly bookingsService: BookingsService,
+    private readonly historyService: BookingHistoryService,
   ) {}
 
   @Post('reset')
@@ -34,8 +37,23 @@ export class AppController {
   }
 
   @Post('bookings')
-  book(@Body(BookingValidationPipe) body: CreateBookingDto) {
-    return this.bookingsService.create(body);
+  async book(
+    @Body() body: unknown,
+    @Headers('idempotency-key') key: string | undefined,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const result = await this.bookingsService.book(body, key);
+    response.status(result.status);
+    return result.body;
+  }
+
+  @Get('bookings')
+  history(
+    @Query('email') email: unknown,
+    @Query('limit') limit: unknown,
+    @Query('cursor') cursor: unknown,
+  ) {
+    return this.historyService.list(email, limit, cursor);
   }
 
   @Get('bookings/:id')

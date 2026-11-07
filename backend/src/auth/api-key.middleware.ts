@@ -8,7 +8,7 @@ export class ApiKeyMiddleware implements NestMiddleware {
 
   use(request: Request, _response: Response, next: NextFunction) {
     const path = request.path.replace(/\/+$/, '');
-    // Also protect the official history path before its Level 4 handler exists.
+    // Authenticate all official method/path combinations before body parsing.
     const required =
       (request.method === 'POST' && /^\/(reset|bookings)$/i.test(path)) ||
       (request.method === 'GET' &&
