@@ -1,13 +1,12 @@
-import { config } from 'dotenv';
-import { Test } from '@nestjs/testing';
+import { authenticated, makeApp, testUrl } from './support';
+
 import type { INestApplication } from '@nestjs/common';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { resolve } from 'node:path';
 import { Pool } from 'pg';
-import request from 'supertest';
+
 import type { App } from 'supertest/types';
-import { AppModule } from '../src/app.module';
 
 interface Slot {
   id: string;
@@ -26,16 +25,6 @@ interface Booking {
 interface SlotsPage {
   slots: (Slot & { available: boolean })[];
 }
-
-// Never fall back to DATABASE_URL: these tests reset every fixture table.
-config({ path: ['.env.test', '.env.level1-local', '.env'], quiet: true });
-const testUrl = process.env.TEST_DATABASE_URL;
-if (!testUrl || !new URL(testUrl).pathname.endsWith('_test')) {
-  throw new Error(
-    'TEST_DATABASE_URL must explicitly name a dedicated database ending in _test',
-  );
-}
-process.env.DATABASE_URL = testUrl;
 
 const inventory: Slot[] = [
   {
@@ -65,15 +54,6 @@ const inventory: Slot[] = [
 ];
 const newBooking = { slot_id: 's1', name: 'Ada Obi', email: 'ada@example.com' };
 
-async function makeApp() {
-  const module = await Test.createTestingModule({
-    imports: [AppModule],
-  }).compile();
-  const app = module.createNestApplication<INestApplication<App>>();
-  await app.init();
-  return app;
-}
-
 describe('Level 1 — real PostgreSQL integration', () => {
   let app: INestApplication<App>;
   let pool: Pool;
@@ -91,7 +71,7 @@ describe('Level 1 — real PostgreSQL integration', () => {
   });
 
   beforeEach(async () => {
-    await request(app.getHttpServer())
+    await authenticated(app)
       .post('/reset')
       .send({ slots: inventory })
       .expect(200, {});
@@ -124,7 +104,7 @@ describe('Level 1 — real PostgreSQL integration', () => {
   }
 
   it('lists every slot in chronological order with required fields and true availability', async () => {
-    const response = await request(app.getHttpServer())
+    const response = await authenticated(app)
       .get('/slots')
       .expect(200)
       .expect('Content-Type', /json/);
@@ -147,7 +127,7 @@ describe('Level 1 — real PostgreSQL integration', () => {
   });
 
   it('filters by exact provider name and retains start ordering', async () => {
-    const response = await request(app.getHttpServer())
+    const response = await authenticated(app)
       .get('/slots')
       .query({ provider: 'Dr Ade' })
       .expect(200);
@@ -160,7 +140,7 @@ describe('Level 1 — real PostgreSQL integration', () => {
   it.each(['dr ade', 'Dr Ade ', 'unknown', "Dr Ade' OR 1=1 --"])(
     'does not broaden or normalize the provider filter: %s',
     async (provider) => {
-      await request(app.getHttpServer())
+      await authenticated(app)
         .get('/slots')
         .query({ provider })
         .expect(200, { slots: [] });
@@ -168,7 +148,7 @@ describe('Level 1 — real PostgreSQL integration', () => {
   );
 
   it('accepts offset timestamps and returns equivalent UTC instants', async () => {
-    await request(app.getHttpServer())
+    await authenticated(app)
       .post('/reset')
       .send({
         slots: [
@@ -181,16 +161,14 @@ describe('Level 1 — real PostgreSQL integration', () => {
         ],
       })
       .expect(200, {});
-    const response = await request(app.getHttpServer())
-      .get('/slots')
-      .expect(200);
+    const response = await authenticated(app).get('/slots').expect(200);
     expect((response.body as SlotsPage).slots[0].start).toBe(
       '2099-12-10T09:00:00.000Z',
     );
   });
 
   it('creates an unwrapped six-field confirmed booking and retrieves it unchanged', async () => {
-    const response = await request(app.getHttpServer())
+    const response = await authenticated(app)
       .post('/bookings')
       .send(newBooking)
       .expect(201);
@@ -211,12 +189,10 @@ describe('Level 1 — real PostgreSQL integration', () => {
     });
     expect(booking.id.length).toBeGreaterThan(0);
     expect(Number.isFinite(Date.parse(booking.created_at))).toBe(true);
-    await request(app.getHttpServer())
+    await authenticated(app)
       .get(`/bookings/${booking.id}`)
       .expect(200, booking);
-    const listing = await request(app.getHttpServer())
-      .get('/slots')
-      .expect(200);
+    const listing = await authenticated(app).get('/slots').expect(200);
     const slots = (listing.body as SlotsPage).slots;
     expect(slots.find((s) => s.id === 's1')?.available).toBe(false);
     expect(slots.filter((s) => s.id !== 's1').every((s) => s.available)).toBe(
@@ -225,7 +201,7 @@ describe('Level 1 — real PostgreSQL integration', () => {
   });
 
   it('stores canonical patient details without changing the six-field response contract', async () => {
-    const response = await request(app.getHttpServer())
+    const response = await authenticated(app)
       .post('/bookings')
       .send({
         ...newBooking,
@@ -236,13 +212,13 @@ describe('Level 1 — real PostgreSQL integration', () => {
     const booking = response.body as Booking;
     expect(booking.name).toBe('Ada Obi');
     expect(booking.email).toBe('ada@example.com');
-    await request(app.getHttpServer())
+    await authenticated(app)
       .get(`/bookings/${booking.id}`)
       .expect(200, booking);
   });
 
   it('does not impose unspecified nonblank-slot or interval-order restrictions on reset', async () => {
-    await request(app.getHttpServer())
+    await authenticated(app)
       .post('/reset')
       .send({
         slots: [
@@ -257,43 +233,39 @@ describe('Level 1 — real PostgreSQL integration', () => {
         ],
       })
       .expect(200, {});
-    const response = await request(app.getHttpServer())
-      .get('/slots')
-      .expect(200);
+    const response = await authenticated(app).get('/slots').expect(200);
     expect((response.body as SlotsPage).slots).toHaveLength(1);
     expect((response.body as SlotsPage).slots[0].id).toBe('');
   });
 
   it('keeps separate bookings distinct across successive requests', async () => {
-    const first = await request(app.getHttpServer())
+    const first = await authenticated(app)
       .post('/bookings')
       .send(newBooking)
       .expect(201);
-    const second = await request(app.getHttpServer())
+    const second = await authenticated(app)
       .post('/bookings')
       .send({ ...newBooking, slot_id: 's2' })
       .expect(201);
     const a = first.body as Booking;
     const b = second.body as Booking;
     expect(a.id).not.toBe(b.id);
-    await request(app.getHttpServer()).get(`/bookings/${a.id}`).expect(200, a);
-    await request(app.getHttpServer()).get(`/bookings/${b.id}`).expect(200, b);
+    await authenticated(app).get(`/bookings/${a.id}`).expect(200, a);
+    await authenticated(app).get(`/bookings/${b.id}`).expect(200, b);
   });
 
   it('persists bookings and availability across an application restart with a new connection pool', async () => {
-    const response = await request(app.getHttpServer())
+    const response = await authenticated(app)
       .post('/bookings')
       .send(newBooking)
       .expect(201);
     const booking = response.body as Booking;
     await app.close();
     app = await makeApp();
-    await request(app.getHttpServer())
+    await authenticated(app)
       .get(`/bookings/${booking.id}`)
       .expect(200, booking);
-    const listing = await request(app.getHttpServer())
-      .get('/slots')
-      .expect(200);
+    const listing = await authenticated(app).get('/slots').expect(200);
     expect(
       (listing.body as SlotsPage).slots.find((s) => s.id === 's1')?.available,
     ).toBe(false);
@@ -305,13 +277,13 @@ describe('Level 1 — real PostgreSQL integration', () => {
   });
 
   it('returns JSON 404 for an unknown non-UUID booking ID', async () => {
-    await request(app.getHttpServer())
+    await authenticated(app)
       .get('/bookings/does-not-exist')
       .expect(404, { error: 'booking not found' });
   });
 
   it('does not create a booking for a nonexistent slot', async () => {
-    await request(app.getHttpServer())
+    await authenticated(app)
       .post('/bookings')
       .send({ ...newBooking, slot_id: 'absent' })
       .expect(404, { error: 'slot not found' });
@@ -322,22 +294,18 @@ describe('Level 1 — real PostgreSQL integration', () => {
   });
 
   it('clears all four fixture tables and replaces the inventory on reset', async () => {
-    const created = await request(app.getHttpServer())
+    const created = await authenticated(app)
       .post('/bookings')
       .send(newBooking)
       .expect(201);
     await seedAuxiliaryState();
-    await request(app.getHttpServer())
+    await authenticated(app)
       .post('/reset')
       .send({ slots: [inventory[3]] })
       .expect(200, {});
     const booking = created.body as Booking;
-    await request(app.getHttpServer())
-      .get(`/bookings/${booking.id}`)
-      .expect(404);
-    const listing = await request(app.getHttpServer())
-      .get('/slots')
-      .expect(200);
+    await authenticated(app).get(`/bookings/${booking.id}`).expect(404);
+    const listing = await authenticated(app).get('/slots').expect(200);
     expect((listing.body as SlotsPage).slots.map((s) => s.id)).toEqual([
       'past',
     ]);
@@ -357,11 +325,8 @@ describe('Level 1 — real PostgreSQL integration', () => {
   });
 
   it('accepts an empty inventory and returns an empty listing', async () => {
-    await request(app.getHttpServer())
-      .post('/reset')
-      .send({ slots: [] })
-      .expect(200, {});
-    await request(app.getHttpServer()).get('/slots').expect(200, { slots: [] });
+    await authenticated(app).post('/reset').send({ slots: [] }).expect(200, {});
+    await authenticated(app).get('/slots').expect(200, { slots: [] });
   });
 
   const invalidResetBodies: [string, unknown][] = [
@@ -396,13 +361,10 @@ describe('Level 1 — real PostgreSQL integration', () => {
   it.each(invalidResetBodies)(
     'rejects %s with 400 and preserves all existing state',
     async (_label, body) => {
-      await request(app.getHttpServer())
-        .post('/bookings')
-        .send(newBooking)
-        .expect(201);
+      await authenticated(app).post('/bookings').send(newBooking).expect(201);
       await seedAuxiliaryState();
       const before = await snapshot();
-      const response = await request(app.getHttpServer())
+      const response = await authenticated(app)
         .post('/reset')
         .send(body as object)
         .expect(400);
@@ -413,7 +375,7 @@ describe('Level 1 — real PostgreSQL integration', () => {
 
   it('rejects malformed reset JSON without deleting existing state', async () => {
     const before = await snapshot();
-    const response = await request(app.getHttpServer())
+    const response = await authenticated(app)
       .post('/reset')
       .set('Content-Type', 'application/json')
       .send('{"slots":')
@@ -423,17 +385,14 @@ describe('Level 1 — real PostgreSQL integration', () => {
   });
 
   it('rolls back every reset deletion if PostgreSQL fails during replacement', async () => {
-    await request(app.getHttpServer())
-      .post('/bookings')
-      .send(newBooking)
-      .expect(201);
+    await authenticated(app).post('/bookings').send(newBooking).expect(201);
     await seedAuxiliaryState();
     const before = await snapshot();
     await pool.query(`create function fail_fixture_insert() returns trigger language plpgsql as
       'begin raise exception ''fixture insertion failure''; end';
       create trigger fail_fixture before insert on slots for each row execute function fail_fixture_insert()`);
     try {
-      await request(app.getHttpServer())
+      await authenticated(app)
         .post('/reset')
         .send({ slots: [inventory[0]] })
         .expect(500, { error: 'internal server error' });
@@ -455,12 +414,12 @@ describe('Level 1 — real PostgreSQL integration', () => {
     expect(index.rows[0].indexdef).toMatch(/WHERE .*status.*confirmed/);
   });
 
-  it('does not expose the scaffold root, history or cancellation routes', async () => {
+  it('does not expose the scaffold root/history and returns 404 for an unknown cancellation ID', async () => {
     for (const path of ['/', '/bookings']) {
-      const response = await request(app.getHttpServer()).get(path).expect(404);
+      const response = await authenticated(app).get(path).expect(404);
       expect(response.body).toEqual({ error: expect.any(String) as unknown });
     }
-    const response = await request(app.getHttpServer())
+    const response = await authenticated(app)
       .delete('/bookings/absent')
       .expect(404);
     expect(response.body).toEqual({ error: expect.any(String) as unknown });

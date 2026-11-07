@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   Param,
@@ -10,6 +11,8 @@ import {
 import { BookingsService } from './bookings/bookings.service';
 import { ResetService } from './reset/reset.service';
 import { SlotsService } from './slots/slots.service';
+import { CreateBookingDto } from './bookings/create-booking.dto';
+import { BookingValidationPipe } from './bookings/booking-validation.pipe';
 
 @Controller()
 export class AppController {
@@ -31,12 +34,17 @@ export class AppController {
   }
 
   @Post('bookings')
-  book(@Body() body: unknown) {
+  book(@Body(BookingValidationPipe) body: CreateBookingDto) {
     return this.bookingsService.create(body);
   }
 
   @Get('bookings/:id')
   booking(@Param('id') id: string) {
     return this.bookingsService.find(id);
+  }
+
+  @Delete('bookings/:id')
+  cancel(@Param('id') id: string) {
+    return this.bookingsService.cancel(id);
   }
 }

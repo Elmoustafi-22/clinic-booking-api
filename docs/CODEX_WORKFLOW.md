@@ -1,5 +1,108 @@
 # Work log
 
+## 7 November 2026 — Level 3 concurrency safety and cancellation
+
+Status: **Levels 1–3 locally verified: 3 PostgreSQL integration suites, 143 passed, 0 failed.** Level 1: 32/32; Level 2: 84/84; Level 3: 27/27. Production build, ESLint and formatting checks passed. Stop after Level 3; no Level 4/5 implementation or authorization is implied. This entry supersedes earlier Level 2-only status statements below.
+
+### Preparation and baseline
+
+- Read AGENTS.md and reviewed API.md, ARCHITECTURE.md, DATABASE.md, TESTING.md, the complete previously retrieved official Koya OpenAPI JSON, and current services/controller/authentication/test infrastructure. Reviewed PostgreSQL explicit-lock documentation and Drizzle SELECT/query-error interfaces.
+- Initial Git status already contained the preceding Level 2 work. Preserved those pending changes; the file inventory below describes this task's incremental edits rather than claiming a clean HEAD baseline.
+- Inspected the installed index directly through pg_index before changing code: bookings_one_confirmed_per_slot_idx is unique=true, valid=true, B-tree(slot_id), WHERE status = 'confirmed'. It was not recreated. Captured task-start fingerprints for schema.ts, every migration/metadata file, package manifests/lock and official PDF; all remained unchanged at final review.
+
+### Concurrency and transaction decisions
+
+- Booking explicitly uses READ COMMITTED, takes the existing shared transaction reset lock, then locks its slot FOR UPDATE. A separate SQL statement evaluates the database wall clock after any lock wait; missing slot remains 404, started/equal-now slot 400, then occupied future slot 409. Insert/commit follows only when eligible and unoccupied.
+- The partial unique index remains the independent database guarantee even if a precheck is bypassed. Catching occurs outside the awaited Drizzle transaction, after rollback. Only a real pg.DatabaseError (optionally unwrapped from DrizzleQueryError) with SQLSTATE 23505, table bookings and constraint bookings_one_confirmed_per_slot_idx becomes ConflictException/409. Other unique constraints, CHECK, FK and infrastructure errors retain sanitized 500 handling. Never issue another query inside an aborted transaction.
+- Cancellation uses the same shared-reset -> slot-row -> booking lock order. It first reads immutable slot_id without locking the booking; reset coordination excludes fixture deletion. Then it locks that slot and executes conditional UPDATE WHERE booking id AND status = confirmed, changing only status/cancelled_at and returning the exact six public fields. Missing ID is 404; an already-cancelled/concurrent loser is 409; successful commit returns 200. No start-time restriction, record deletion or reactivation.
+- Reset obtains its exclusive reset lock before any table write. Both mutation paths lock only one slot and never acquire a booking lock before its slot; review found no cycle among implemented application paths. Locks release on commit/rollback before service completion. No application mutex, process-local correctness state, session-level lock or automatic retry loop was added.
+- Explicit READ COMMITTED makes fresh-state checks independent of a server isolation default. External SQL clients using another lock order or indefinitely holding locks remain an operational risk; production timeout/deadlock policy is not silently mapped to an invented 409.
+
+### Tests and actual verification
+
+- Added a dedicated Level 3 integration suite against an actual listening localhost Nest server and Docker PostgreSQL 18.6, using simultaneous Promise.all HTTP requests with valid API keys and distinct emails. Also exercised two independent Nest instances/connection pools.
+- Verified 16 same-slot attempts yield one 201/fifteen 409; 12 cross-instance attempts yield one winner; 12 concurrent cancellations yield one 200/eleven 409. Eight cancellation/rebooking races accept actual ordering-valid winners/losers while asserting final database counts, retained history, timestamp/status coherence and availability.
+- Direct PostgreSQL tests reject a second confirmed insert while permitting multiple cancelled records. Cancellation tests cover exact response fields, original timestamp precision/data preservation, unknown/repeated IDs, post-start cancellation, cancelled lookup, availability and new-ID rebooking without reactivating old records.
+- Temporary test triggers provoke real expected index, unrelated primary-key 23505, CHECK 23514 and FK 23503 errors; direct probes assert the actual constraint/code before checking HTTP 409 versus sanitized 500. Failed booking/cancellation transactions leave prior state intact and permit healthy retries after cleanup.
+- Dedicated test clients hold a real slot row lock; pg_blocking_pids proves the HTTP request is blocked. Time crossing while blocked yields 400 after release; another slot remains bookable during the wait. A reset/cancel/book race yields only documented ordering-valid responses with no orphan or duplicate confirmed row.
+- First full run passed 143 tests. Review strengthened direct error-identity probes and guarded the primary-key fixture against recursive trigger calls; the same 143 tests passed again. Final review explicitly pinned READ COMMITTED; final rerun passed **143/143 across 3 suites, 0 failed, 89.837 seconds**. No integration failure, unexpected concurrency 500 or deadlock was observed. Expected 500s occur only in deliberate fault-injection cases.
+- Final npm run build, ESLint src/test/drizzle.config.ts and Prettier source/test/config checks each exited 0. Final git diff --check also passed. No dependency installation/change or new migration was required. Existing Level 2 security findings were not re-audited or claimed remediated.
+
+### Incremental files changed
+
+Created:
+
+- backend/test/level3.e2e-spec.ts
+
+Modified:
+
+- backend/src/bookings/bookings.service.ts — row locks, fresh time/occupancy checks, narrow database-error mapping and cancellation.
+- backend/src/app.controller.ts — thin official DELETE /bookings/:id handler.
+- backend/src/auth/api-key.middleware.ts — comment updated; authentication behaviour unchanged.
+- backend/test/app.e2e-spec.ts — corrected test name to describe the now-existing DELETE route's unknown-ID 404; assertions retained.
+- docs/ARCHITECTURE.md, docs/DATABASE.md, docs/API.md, docs/TESTING.md and docs/CODEX_WORKFLOW.md — current semantics, transaction/lock review and actual results.
+- backend/README.md and docs/DEPLOYMENT.md — stage boundary/cancellation availability corrected; no deployment configuration changed.
+
+No files removed. No schema, index, migration history, dependency, secret, official specification, frontend, PRD or environment configuration change in Level 3. Test-only trigger/functions and lock-holding transactions are removed/released in finally; no such objects were installed in runtime/development schema as a feature.
+
+### Remaining risks and next boundary
+
+No unresolved issue blocks the local Level 3 acceptance scope. Finite concurrent tests are not an exhaustive proof of every external-client schedule; the PostgreSQL unique index supplies the independent invariant. External lock holders, production timeout/deadlock policy, hosted persistence/load testing and the external Koya assessor remain unverified. Previous dependency-audit findings remain outstanding. Await explicit Level 4 authorization for database-backed idempotency/history pagination; Level 5 limiter and frontend/deployment remain deferred.
+
+## 6 November 2026 — Level 2 authentication and booking validation
+
+Status: **Levels 1–2 locally verified: 2 real-PostgreSQL integration suites, 116 passed, 0 failed.** Level 1 retains all 32 passing tests; Level 2 adds 84. Production build, ESLint and formatting checks passed. Stop after Level 2; Level 3 has not been authorized or implemented. This entry supersedes the earlier Level 1-only implementation status below.
+
+### Review and scope
+
+- Read AGENTS.md, API.md, ARCHITECTURE.md, DATABASE.md and TESTING.md, plus all nine official PDF pages and the complete previously retrieved official OpenAPI JSON (version 1.0, fingerprint recorded in API.md). The live web reader could not retrieve the JSON URL; the prior retrieval and unchanged PDF supplied the authoritative contract. Official specification files were not edited.
+- Inspected the existing module/controller/services, connection/schema/migration design, test setup, runtime configuration and clean starting Git status before changing code. No new public handler, Level 3–5 business behaviour, schema or migration was added.
+
+### Authentication and validation decisions
+
+- Added reusable ApiKeyGuard as a global APP_GUARD, sharing the same instance with ApiKeyMiddleware. Expected API_KEY is a server environment secret validated during provider creation before startup/listening. Reject missing/blank config, surrounding whitespace and control characters without including the value in errors. Compare SHA-256 digests using timingSafeEqual; no hardcoded production key, logging or browser exposure.
+- A guard alone would authenticate after Nest's default body parser, and would not run for the two not-yet-implemented routes. Disabled automatic parsing in main/test application factories; module middleware authenticates the six official method/path combinations before JSON/urlencoded parsing, reusing the guard check. Correctly authenticated history/cancellation still return 404 because no handlers were introduced. Missing/empty/incorrect/whitespace-only/repeated key headers return 401 with the common Error envelope.
+- Added CreateBookingDto and a booking-only transformation/validation pipe using class-transformer and existing class-validator. Required values must be strings and nonblank; trim name/email before syntax checks, preserve slot_id exactly, disable implicit coercion, and retain the existing lowercased email storage. No name-length limit, UUID requirement, domain whitelist or unknown-property rejection was added. Error strings contain field descriptions, not submitted values or validation targets.
+- Added DatabaseClock, returning the SQL clock_timestamp() expression. After shared reset-lock acquisition, PostgreSQL evaluates starts_at <= clock_timestamp(); equality/past returns 400 before attempted insertion/occupancy handling. Missing slot remains 404. A small SQL-expression time seam makes exact-boundary tests deterministic while retaining actual PostgreSQL reads/writes. No Level 3 slot lock, future occupied-slot 409 mapping or cancellation was introduced.
+- Added class-transformer and declared Express directly for the manually ordered parsers. The schema, all migration files and official PDF remain unchanged. Frontend and PRD were not modified.
+
+### Tests and actual results
+
+- Retained every Level 1 assertion; moved test connection/app setup into support.ts and attached generated test-key headers to authenticated calls. Test secrets are generated at runtime and do not use/log developer credentials.
+- Level 2 covers all six paths with missing/empty/wrong/whitespace keys and correct keys; duplicate/differing-length keys, header/path casing, authentication before DTO/reset validation and malformed JSON, startup configuration, required-field/type/blank/email failures, normalization and direct stored-email checks, arbitrary IDs, 404 missing slots, past/occupied precedence and exact-now/strictly-future time boundaries. Common JSON error shape is checked throughout.
+- First functional run passed 114 then-defined tests. Removed a synthetic guard-context test and added meaningful configuration/key-length edge cases. Final npm test -- --json --outputFile <temporary report>: **2 passed suites, 116 passed tests, 0 failures; 54.598 seconds**. Report confirms app.e2e-spec.ts 32/32 and level2.e2e-spec.ts 84/84. Real Docker PostgreSQL 18.6; no in-memory database or mocked query results.
+- Final npm run build, ESLint src/test/drizzle.config.ts and Prettier source/test/config checks each exited 0. No functional test failure occurred during Level 2. An early lint attempt detected mixed line endings after a Windows edit; formatting resolved them. An initial formatter target included .env.example (unsupported inferred parser); reran supported targets successfully.
+- Baseline and post-install npm audits both report 34 findings: 5 low, 27 moderate, 2 high, 0 critical. Compared advisory identities and affected-package sets: **no newly introduced advisories or newly affected packages**. Existing findings remain; no force upgrade or unrelated remediation was performed. Audit snapshots/test JSON are temporary, not tracked deliverables.
+
+### Documentation and file inventory
+
+Updated API.md, ARCHITECTURE.md, DATABASE.md, TESTING.md, DEPLOYMENT.md, backend README and this log for actual runtime behaviour, the new API_KEY environment requirement and remaining level boundaries. Existing developer .env/local credential files were not overwritten.
+
+Created:
+
+- backend/src/auth/api-key.guard.ts
+- backend/src/auth/api-key.middleware.ts
+- backend/src/bookings/create-booking.dto.ts
+- backend/src/bookings/booking-validation.pipe.ts
+- backend/src/database/database-clock.ts
+- backend/test/level2.e2e-spec.ts
+- backend/test/support.ts
+
+Modified:
+
+- backend/src/app.module.ts, backend/src/app.controller.ts and backend/src/main.ts
+- backend/src/bookings/bookings.service.ts and backend/src/database/database.module.ts
+- backend/test/app.e2e-spec.ts
+- backend/.env.example, backend/package.json and backend/package-lock.json
+- backend/README.md
+- docs/API.md, docs/ARCHITECTURE.md, docs/DATABASE.md, docs/TESTING.md, docs/DEPLOYMENT.md and docs/CODEX_WORKFLOW.md
+
+No files were removed. No schema/migration, official specification, frontend or PRD change. Local API startup now requires a privately configured API_KEY; the test runner supplies its own isolated value.
+
+### Remaining work
+
+Level 3 requires explicit authorization: map confirmed-slot conflicts to 409, add slot row locking and concurrency acceptance tests, implement cancellation and test repeated cancellation/cancel-versus-rebook races while preserving history. The existing partial unique index continues protecting confirmed-slot uniqueness; a duplicate future-slot insert still produces generic 500 until that controlled handling is implemented. Levels 4–5 idempotency/history/limiter, dependency-audit remediation, frontend/proxy and hosted deployment remain deferred. No unresolved issue blocks the verified Level 2 scope, and no external assessor result is claimed.
+
 ## 6 November 2026 — Approved policies, backend foundation and Level 1
 
 Status: **Level 1 locally verified: 32 integration tests passed**, build and lint/format checks passed. No external Koya assessor was run. Stop at this requested implementation boundary; Levels 2–5 remain unimplemented/unverified. This entry supersedes historical design-only status statements below.

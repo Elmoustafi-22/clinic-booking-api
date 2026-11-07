@@ -1,12 +1,12 @@
 # API contract — official Koya assessment
 
-Updated 6 November 2026. This document records the full official contract plus separately labelled owner policies. The backend foundation and Level 1 are implemented; see TESTING.md for actual results. Later-level contracts below remain requirements, not claims of implemented behaviour.
+Updated 7 November 2026. This document records the full official contract plus separately labelled owner policies. The backend foundation and Levels 1–3 are implemented; see TESTING.md for actual results. Later-level contracts below remain requirements, not claims of implemented behaviour.
 
 ## Current implementation boundary
 
-Implemented: POST /reset (200 {}), GET /slots, POST /bookings (Level 1 creation only), GET /bookings/{id}. No GET /, GET /bookings history or DELETE cancellation route exists. Names/emails are stored canonically and basic object/string input checks protect writes, but full Level 2 required/nonempty/email/start validation is deferred. The partial unique index exists; controlled duplicate-slot 409 handling and concurrent-request acceptance tests are deferred to Level 3. A duplicate insert currently returns generic 500 while the index prevents a duplicate row.
+Implemented: POST /reset (200 {}), GET /slots, POST /bookings (Levels 1–3 validation/concurrency), GET /bookings/{id} and DELETE /bookings/{id}. GET / and GET /bookings history have no handler. A DTO/pipe requires nonblank string slot_id/name/email, trims name/email before validation, validates email format and stores email lowercase. slot_id retains its submitted value, case and surrounding spaces if it contains a non-whitespace character. Missing slots return 404; a slot whose start is at or before the PostgreSQL clock returns 400 before insertion/occupancy handling. Booking locks the slot row before evaluating the current time and occupancy. An occupied future slot returns 409; the existing partial unique index remains the final database guarantee. Only the named confirmed-slot uniqueness violation is mapped to 409 after transaction rollback; unrelated database failures remain generic 500.
 
-Per the explicit Level 1-only authorization, there is no API-key guard yet. Global authentication described below is the target contract for Level 2, not current runtime behaviour. Idempotency headers and rate limiting are not processed yet; their tables exist only for foundation/reset lifecycle support. The Level 1 server is not ready for external deployment.
+API_KEY is a required server-only environment secret validated at startup. A reusable global ApiKeyGuard and an early middleware using the same key check protect all six official method/path combinations, including reset, before JSON parsing and DTO validation. Missing, empty, whitespace-only, incorrect or repeated key headers return 401 Error JSON. GET /bookings history authenticates but returns 404 with a valid key until Level 4. DELETE /bookings/{id} is implemented: 200 cancelled Booking, 404 missing booking, 409 already cancelled. Idempotency headers and rate limiting are not processed yet; their tables exist only for foundation/reset lifecycle support. Only Levels 1–3 are implemented; no hosted deployment or full assessment verification is claimed.
 
 ## Authority and interpretation
 
@@ -233,13 +233,21 @@ Approved 6 November 2026. These resolve gaps in the official source; they do not
 | Same-body identity | Canonicalized parsed JSON preserving submitted strings; object key order/JSON formatting do not matter | Level 4 pending. |
 | Response retention | Retain until reset; cache successful bookings and deterministic domain errors, not transient infrastructure failures or 429 | Level 4 pending. |
 | Limit algorithm | PostgreSQL rolling 60 seconds; count admitted attempts, including failed validation/business attempts when a usable email bucket exists | Level 5 pending. |
-| Rejected/email-less attempts | Denied 429 does not extend the window; missing/unusable email gets normal validation error without a shared bucket | Level 2/5 pending. |
+| Rejected/email-less attempts | Denied 429 does not extend the window; missing/unusable email gets normal validation error without a shared bucket | Validation implemented; Level 5 admission pending. |
 | History error policy | Missing email or malformed/foreign cursor returns 400 Error JSON | Level 4 pending. |
-| Started/occupied precedence | Return started-slot 400 before checking occupancy | Level 2/3 pending. |
-| Cancellation/history | Include cancelled bookings in history and allow cancellation after appointment start | Level 3/4 pending. |
+| Started/occupied precedence | Return started-slot 400 before checking occupancy | Implemented, including a fresh clock check after the row lock is acquired. |
+| Cancellation/history | Include cancelled bookings in history and allow cancellation after appointment start | Cancellation and individual cancelled-booking lookup implemented; Level 4 history pending. |
 
 The official operation-status matrix remains unchanged. Additional policy-defined responses are reset 400 and history 400 for missing email/malformed/foreign cursors. Unexpected infrastructure failures currently use generic 500 {error: "internal server error"}; this is implementation handling, not an official declared status.
 
 Reset checks required object/array/string types and timezone-qualified date-time values, accepts past/empty inventories, ignores unknown properties, and adds no duration/end-after-start rule. Because PostgreSQL text cannot contain a NUL character, it is rejected as invalid input with 400. Exact error wording is implementation-defined; only the Error envelope is required.
 
-Remaining minor source omissions include key/field size limits, byte-exact timestamp spelling, unknown-field identity nuances, and stale but otherwise well-formed cursors. Do not add extra restrictions or endpoints while implementing a later level. None blocks Level 1's approved scope; full email validation, history and header handling must be reviewed/tested in their requested levels.
+Remaining minor source omissions include key/field size limits, byte-exact timestamp spelling, unknown-field identity nuances, and stale but otherwise well-formed cursors. Do not add extra restrictions or endpoints while implementing a later level. None blocks Levels 1–3. Email syntax uses class-validator IsEmail with its optional email maximum-length check disabled; no arbitrary name/slot-ID length, UUID, provider, domain whitelist or extra-property restriction was added. History and idempotency header handling remain later-level work.
+
+## Implemented Level 3 behaviour
+
+Concurrent same-slot requests use PostgreSQL transactions and row locks; exactly one may create a confirmed booking, while occupied competitors return 409 Error JSON. Transactions acquire shared reset coordination then the slot row FOR UPDATE. A separate statement after the lock wait checks starts_at <= clock_timestamp() and returns 400 before the occupancy check. A missing slot remains 404.
+
+Cancellation reads the immutable slot ID under shared reset coordination, locks the slot row, then conditionally updates only a confirmed booking. It commits before returning the six-field cancelled Booking, preserves all original fields except status, retains the record and releases availability. Concurrent cancellations yield one 200 and competing 409 responses. Cancellation after start is permitted. Rebooking creates a new ID and never reactivates an old cancelled row.
+
+Cancellation/rebooking responses depend on which transaction obtains the slot lock first: booking before cancellation may return 409; after cancellation commits, one new booking can return 201. There is never more than one confirmed booking. GET /slots and GET /bookings/{id} retain their exact schemas. No idempotency, history/pagination, rate limiting or additional route was added.
