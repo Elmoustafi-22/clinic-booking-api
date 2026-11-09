@@ -1,4 +1,9 @@
-import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { drizzle, NodePgDatabase } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
 import * as schema from './schema';
@@ -18,6 +23,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       // bounded queue for bursts beyond the default ten-client pool capacity.
       connectionTimeoutMillis: 30000,
     });
+    // Idle clients can disconnect during provider maintenance. An unhandled
+    // pool 'error' event would terminate Node instead of discarding the client.
+    this.pool.on('error', () =>
+      new Logger(DatabaseService.name).error('database connection failed'),
+    );
     this.db = drizzle(this.pool, { schema });
   }
 

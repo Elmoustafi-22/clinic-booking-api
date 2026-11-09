@@ -134,6 +134,7 @@ export class BookingsService {
   }
 
   async cancel(id: string) {
+    stringInput(id, 'id');
     return this.database.db.transaction(
       async (tx) => {
         await tx.execute(
@@ -164,6 +165,7 @@ export class BookingsService {
   }
 
   async find(id: string) {
+    stringInput(id, 'id');
     const [booking] = await this.database.db
       .select(bookingFields)
       .from(bookings)

@@ -1,12 +1,10 @@
 # API contract — official Koya assessment
 
-Updated 7 November 2026. This document records the full official contract plus separately labelled owner policies. The backend foundation and Levels 1–5 are implemented; see TESTING.md for actual results. Specification requirements and owner policies remain distinguished below.
+Updated 9 November 2026. This document records the full official contract plus separately labelled owner policies. The backend foundation and Levels 1–5 are implemented; see TESTING.md for actual results. Specification requirements and owner policies remain distinguished below.
 
-## Current implementation boundary
+## Implementation status
 
-Implemented: POST /reset (200 {}), GET /slots, POST /bookings (Levels 1–5 validation/concurrency/idempotency/rate limiting), GET /bookings/{id}, DELETE /bookings/{id} and GET /bookings?email=. All six official operations now have handlers; the scaffold GET / remains absent. A DTO/pipe requires nonblank string slot_id/name/email, trims name/email before validation, validates email format and stores email lowercase. slot_id retains its submitted value, case and surrounding spaces if it contains a non-whitespace character. Missing slots return 404; a slot whose start is at or before the PostgreSQL clock returns 400 before insertion/occupancy handling. Booking locks the slot row before evaluating the current time and occupancy. An occupied future slot returns 409; the existing partial unique index remains the final database guarantee. Only the named confirmed-slot uniqueness violation is mapped to 409 after transaction/savepoint rollback; unrelated database failures remain generic 500.
-
-API_KEY is a required server-only environment secret validated at startup. A reusable global ApiKeyGuard and an early middleware using the same key check protect all six official method/path combinations, including reset, before JSON parsing and DTO validation. Missing, empty, whitespace-only, incorrect or repeated key headers return 401 Error JSON. GET /bookings history is authenticated and implemented, with missing email/malformed or foreign cursors returning 400. DELETE /bookings/{id} is implemented: 200 cancelled Booking, 404 missing booking, 409 already cancelled. Idempotency-Key is processed before keyed DTO validation; PostgreSQL rolling admission is implemented before full validation for new attempts; existing-key replay/422 takes precedence. Only Levels 1–5 are implemented; no hosted deployment or full assessment verification is claimed.
+All six required operations and Levels 1–5 are implemented locally. [TESTING.md](TESTING.md) records executed verification, [ARCHITECTURE.md](ARCHITECTURE.md) explains transaction design, and [DEPLOYMENT.md](DEPLOYMENT.md) records unverified hosted release gates. The sections below distinguish the official contract from approved owner policies.
 
 ## Authority and interpretation
 
@@ -26,7 +24,7 @@ Sections labelled **Specification** state contract requirements. Gaps are explic
 Every error has this JSON structure:
 
 ```json
-{"error":"<message>"}
+{ "error": "<message>" }
 ```
 
 `Error.error` is a required, non-null string. The specification does not fix message text; `slot not found` is a shared schema example, not the required message for every failure. Do not return NestJS's default `statusCode/message/error` envelope or an array of validation errors in place of the specified shape.
@@ -39,14 +37,14 @@ Every error has this JSON structure:
 
 All four fields are required:
 
-| Field | Type | Contract |
-| --- | --- | --- |
-| id | string | Caller-supplied identifier; arbitrary strings such as `s1`, not UUID-only. |
-| provider | string | Provider name; exact-match query filtering. |
-| start | string, date-time | Appointment start. |
-| end | string, date-time | Appointment end. |
+| Field    | Type              | Contract                                                                   |
+| -------- | ----------------- | -------------------------------------------------------------------------- |
+| id       | string            | Caller-supplied identifier; arbitrary strings such as `s1`, not UUID-only. |
+| provider | string            | Provider name; exact-match query filtering.                                |
+| start    | string, date-time | Appointment start.                                                         |
+| end      | string, date-time | Appointment end.                                                           |
 
-No slot uniqueness, nonblank-string, duration or `end > start` validation rule is declared in the source; reset handling for invalid/duplicate slots is a remaining gap. Past slots are explicitly accepted by reset.
+The source does not declare duplicate-ID error handling, nonblank-string rules, duration or `end > start` validation. Approved reset policies below resolve invalid/duplicate input handling. Past slots are explicitly accepted by reset.
 
 ### SlotWithAvailability
 
@@ -56,11 +54,11 @@ All Slot fields plus required `available: boolean`. It is false while a confirme
 
 Required JSON object fields:
 
-| Field | Type | Contract |
-| --- | --- | --- |
-| slot_id | string | Required and nonempty. Refers to a supplied slot. |
-| name | string | Required and nonempty; trim spaces. |
-| email | string | Required and nonempty; valid email; trim spaces and store lowercase. |
+| Field   | Type   | Contract                                                             |
+| ------- | ------ | -------------------------------------------------------------------- |
+| slot_id | string | Required and nonempty. Refers to a supplied slot.                    |
+| name    | string | Required and nonempty; trim spaces.                                  |
+| email   | string | Required and nonempty; valid email; trim spaces and store lowercase. |
 
 Missing/empty fields or an invalid email return 400. The schema has no additional request fields, but does not prohibit additional properties. It does not require trimming `slot_id` or changing provider/ID case.
 
@@ -68,14 +66,14 @@ Missing/empty fields or an invalid email return 400. The schema has no additiona
 
 All six fields are required:
 
-| Field | Type | Contract |
-| --- | --- | --- |
-| id | string | Any unique ID generated by the implementation. |
-| slot_id | string | Booked slot ID. |
-| name | string | Trimmed name. |
-| email | string | Trimmed, lowercase email. |
-| status | string enum | `confirmed` or `cancelled`. |
-| created_at | string, date-time | Creation timestamp. |
+| Field      | Type              | Contract                                       |
+| ---------- | ----------------- | ---------------------------------------------- |
+| id         | string            | Any unique ID generated by the implementation. |
+| slot_id    | string            | Booked slot ID.                                |
+| name       | string            | Trimmed name.                                  |
+| email      | string            | Trimmed, lowercase email.                      |
+| status     | string enum       | `confirmed` or `cancelled`.                    |
+| created_at | string, date-time | Creation timestamp.                            |
 
 The contract has no nested slot object, provider, start/end or cancelled_at field in Booking. Internal columns must not leak into responses. Booking response examples below use an illustrative generated ID and timestamp.
 
@@ -88,17 +86,22 @@ Required JSON body: an object with required `slots`, an array of Slot objects. N
 ```json
 {
   "slots": [
-    {"id":"s1","provider":"Dr Ade","start":"2026-12-10T09:00:00Z","end":"2026-12-10T09:30:00Z"}
+    {
+      "id": "s1",
+      "provider": "Dr Ade",
+      "start": "2026-12-10T09:00:00Z",
+      "end": "2026-12-10T09:30:00Z"
+    }
   ]
 }
 ```
 
 Responses:
 
-| Status | Meaning | Body |
-| --- | --- | --- |
-| 200 | Done | No response content/schema is declared. |
-| 401 | Missing/wrong API key | Error JSON, from the global rule. |
+| Status | Meaning               | Body                                    |
+| ------ | --------------------- | --------------------------------------- |
+| 200    | Done                  | No response content/schema is declared. |
+| 401    | Missing/wrong API key | Error JSON, from the global rule.       |
 
 **Unspecified:** exact success JSON, invalid reset-body status, duplicate IDs, nonblank slot strings, inverted intervals, and whether idempotency/rate-limit data is cleared. The global JSON statement does not supply a success body. Do not claim `{ "success": true }`, `{}`, a slot count, an empty body or 204 is mandated.
 
@@ -111,7 +114,13 @@ Optional query `provider: string`: exact provider-name match. No body. Return ev
 ```json
 {
   "slots": [
-    {"id":"s1","provider":"Dr Ade","start":"2026-12-10T09:00:00Z","end":"2026-12-10T09:30:00Z","available":true}
+    {
+      "id": "s1",
+      "provider": "Dr Ade",
+      "start": "2026-12-10T09:00:00Z",
+      "end": "2026-12-10T09:30:00Z",
+      "available": true
+    }
   ]
 }
 ```
@@ -123,24 +132,31 @@ Optional query `provider: string`: exact provider-name match. No body. Return ev
 Required JSON body: NewBooking. Optional `Idempotency-Key: string` request header. Global `X-API-Key` still applies.
 
 ```json
-{"slot_id":"s1","name":"Ada Obi","email":"ada@example.com"}
+{ "slot_id": "s1", "name": "Ada Obi", "email": "ada@example.com" }
 ```
 
 **201 application/json:** the Booking object directly, without a `booking` envelope:
 
 ```json
-{"id":"generated-id","slot_id":"s1","name":"Ada Obi","email":"ada@example.com","status":"confirmed","created_at":"2026-11-06T16:00:00Z"}
+{
+  "id": "generated-id",
+  "slot_id": "s1",
+  "name": "Ada Obi",
+  "email": "ada@example.com",
+  "status": "confirmed",
+  "created_at": "2026-11-06T16:00:00Z"
+}
 ```
 
-| Status | Required condition | Body / headers |
-| --- | --- | --- |
-| 201 | New booking succeeds (Level 1) | Booking with status confirmed. |
-| 400 | slot_id/name/email missing or empty, invalid email, or slot already started (Level 2) | Error JSON. |
-| 401 | Missing/wrong API key (global Level 2) | Error JSON. |
-| 404 | Slot does not exist (Level 2) | Error JSON. |
-| 409 | Slot already has a confirmed booking, including simultaneous requests (Level 3) | Error JSON. |
-| 422 | Same Idempotency-Key with a different body (Level 4) | Error JSON. |
-| 429 | Sixth attempt for an email within the per-minute allowance (Level 5) | Error JSON and required `Retry-After`, integer whole seconds to wait. |
+| Status | Required condition                                                                    | Body / headers                                                        |
+| ------ | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| 201    | New booking succeeds (Level 1)                                                        | Booking with status confirmed.                                        |
+| 400    | slot_id/name/email missing or empty, invalid email, or slot already started (Level 2) | Error JSON.                                                           |
+| 401    | Missing/wrong API key (global Level 2)                                                | Error JSON.                                                           |
+| 404    | Slot does not exist (Level 2)                                                         | Error JSON.                                                           |
+| 409    | Slot already has a confirmed booking, including simultaneous requests (Level 3)       | Error JSON.                                                           |
+| 422    | Same Idempotency-Key with a different body (Level 4)                                  | Error JSON.                                                           |
+| 429    | Sixth attempt for an email within the per-minute allowance (Level 5)                  | Error JSON and required `Retry-After`, integer whole seconds to wait. |
 
 **Idempotency requirement:** same key and same body returns the same response, specifically the same status code and booking ID, and never creates another booking. Without the optional header no idempotency guarantee is declared. The source does not define canonical body equivalence, key scope/lifetime, failure caching or interaction with rate limiting.
 
@@ -150,11 +166,11 @@ Required JSON body: NewBooking. Optional `Idempotency-Key: string` request heade
 
 Required path parameter `id: string`; no UUID pattern is prescribed. No request body or query parameters are declared.
 
-| Status | Meaning | Body |
-| --- | --- | --- |
-| 200 | Found | Booking directly. |
-| 404 | No booking with that ID | Error JSON. |
-| 401 | Missing/wrong API key | Error JSON. |
+| Status | Meaning                 | Body              |
+| ------ | ----------------------- | ----------------- |
+| 200    | Found                   | Booking directly. |
+| 404    | No booking with that ID | Error JSON.       |
+| 401    | Missing/wrong API key   | Error JSON.       |
 
 There is no status filter or instruction to conceal cancelled records. Return the stored booking with its current status; cancellation does not make it a nonexistent ID.
 
@@ -162,17 +178,24 @@ There is no status filter or instruction to conceal cancelled records. Return th
 
 Required path parameter `id: string`; no body. Set status to cancelled and free the slot.
 
-| Status | Meaning | Body |
-| --- | --- | --- |
-| 200 | Cancellation succeeds | Cancelled Booking directly. |
-| 404 | No booking with that ID | Error JSON. |
-| 409 | Booking already cancelled | Error JSON. |
-| 401 | Missing/wrong API key | Error JSON. |
+| Status | Meaning                   | Body                        |
+| ------ | ------------------------- | --------------------------- |
+| 200    | Cancellation succeeds     | Cancelled Booking directly. |
+| 404    | No booking with that ID   | Error JSON.                 |
+| 409    | Booking already cancelled | Error JSON.                 |
+| 401    | Missing/wrong API key     | Error JSON.                 |
 
 Successful body example, following the operation's required behaviour:
 
 ```json
-{"id":"generated-id","slot_id":"s1","name":"Ada Obi","email":"ada@example.com","status":"cancelled","created_at":"2026-11-06T16:00:00Z"}
+{
+  "id": "generated-id",
+  "slot_id": "s1",
+  "name": "Ada Obi",
+  "email": "ada@example.com",
+  "status": "cancelled",
+  "created_at": "2026-11-06T16:00:00Z"
+}
 ```
 
 **Resolved example conflict:** the PDF's generated Booking sample shows confirmed even for DELETE. The operation explicitly says to set cancelled and its 200 description is the cancelled booking. Those definitive instructions govern; do not return confirmed after successful cancellation. No past-appointment cancellation restriction is stated; do not add one.
@@ -181,18 +204,25 @@ Successful body example, following the operation's required behaviour:
 
 No body. Query parameters:
 
-| Name | Required | Type / rule |
-| --- | --- | --- |
-| email | yes | string; case-insensitive match. |
-| limit | no | integer 1–50 inclusive; default 10; anything outside this rule returns 400. |
-| cursor | no | string; pass the previous next_cursor as cursor. |
+| Name   | Required | Type / rule                                                                 |
+| ------ | -------- | --------------------------------------------------------------------------- |
+| email  | yes      | string; case-insensitive match.                                             |
+| limit  | no       | integer 1–50 inclusive; default 10; anything outside this rule returns 400. |
+| cursor | no       | string; pass the previous next_cursor as cursor.                            |
 
 **200 application/json:**
 
 ```json
 {
   "bookings": [
-    {"id":"generated-id","slot_id":"s1","name":"Ada Obi","email":"ada@example.com","status":"confirmed","created_at":"2026-11-06T16:00:00Z"}
+    {
+      "id": "generated-id",
+      "slot_id": "s1",
+      "name": "Ada Obi",
+      "email": "ada@example.com",
+      "status": "confirmed",
+      "created_at": "2026-11-06T16:00:00Z"
+    }
   ],
   "next_cursor": null
 }
@@ -200,24 +230,24 @@ No body. Query parameters:
 
 Return the person's bookings oldest first. `bookings` is an array of Booking; `next_cursor` is a nullable string. Return a string to continue and null on the last page. Empty history therefore has `bookings: []` and `next_cursor: null`. No confirmed-only filter is specified; both booking statuses belong to the person's history. Both envelope properties are defined but not formally included in an OpenAPI `required` array; return both consistently according to the operation description.
 
-| Status | Meaning | Body |
-| --- | --- | --- |
-| 200 | A page of bookings | Envelope above. |
-| 400 | Invalid limit | Error JSON. |
-| 401 | Missing/wrong API key | Error JSON. |
+| Status | Meaning               | Body            |
+| ------ | --------------------- | --------------- |
+| 200    | A page of bookings    | Envelope above. |
+| 400    | Invalid limit         | Error JSON.     |
+| 401    | Missing/wrong API key | Error JSON.     |
 
 **Unspecified:** error status for missing/invalid email, malformed/foreign/stale cursor, cursor encoding and snapshot semantics. Required email does not by itself specify the error status or require email-format validation on this GET. Creation's email-validation rule must not silently be extended into a new documented GET contract.
 
 ## Complete status inventory
 
-| Operation | Explicit operation responses | Global response |
-| --- | --- | --- |
-| POST /reset | 200 | 401 |
-| GET /slots | 200 | 401 |
-| POST /bookings | 201, 400, 404, 409, 422, 429 | 401 |
-| GET /bookings/{id} | 200, 404 | 401 |
-| DELETE /bookings/{id} | 200, 404, 409 | 401 |
-| GET /bookings | 200, 400 | 401 |
+| Operation             | Explicit operation responses | Global response |
+| --------------------- | ---------------------------- | --------------- |
+| POST /reset           | 200                          | 401             |
+| GET /slots            | 200                          | 401             |
+| POST /bookings        | 201, 400, 404, 409, 422, 429 | 401             |
+| GET /bookings/{id}    | 200, 404                     | 401             |
+| DELETE /bookings/{id} | 200, 404, 409                | 401             |
+| GET /bookings         | 200, 400                     | 401             |
 
 Complete required status set: **200, 201, 400, 401, 404, 409, 422, 429**. The source does not declare 204, 403, 405, infrastructure-failure codes, reset-validation codes or statuses for several invalid-query cases. Framework defaults must not be presented as official requirements. All error responses, including any implementation-defined ones later approved, must retain the common Error shape.
 
@@ -225,49 +255,61 @@ Complete required status set: **200, 201, 400, 401, 404, 409, 422, 429**. The so
 
 Approved 6 November 2026. These resolve gaps in the official source; they do not modify the official specification. Earlier **Unspecified** notes describe source omissions, resolved as follows where applicable.
 
-| Topic | Approved policy | Current state |
-| --- | --- | --- |
-| Reset success/errors | 200 with {}; invalid payloads and duplicate slot IDs return 400 without modifying existing state | Implemented. |
-| Reset lifecycle | Atomically clear bookings, slots, idempotency records and rate-limit attempts, then install submitted inventory | Implemented. |
-| Retry precedence | Matching idempotency keys replay the original response and changed bodies return 422 before rate limiting | Implemented before admission. |
-| Same-body identity | Canonicalized parsed JSON preserving submitted strings; object key order/JSON formatting do not matter | Implemented, including nested/unknown fields and retained array order. |
-| Response retention | Retain until reset; cache successful bookings and deterministic domain errors, not transient infrastructure failures or 429 | Implemented: 201 and deterministic DTO/business 400/404/409; parser/auth/mismatch/infrastructure errors are not newly cached. |
-| Limit algorithm | PostgreSQL rolling 60 seconds; count admitted attempts, including failed validation/business attempts when a usable email bucket exists | Implemented. |
-| Rejected/email-less attempts | Denied 429 does not extend the window; missing/unusable email gets normal validation error without a shared bucket | Implemented. |
-| History error policy | Missing email or malformed/foreign cursor returns 400 Error JSON | Implemented. |
-| Started/occupied precedence | Return started-slot 400 before checking occupancy | Implemented, including a fresh clock check after the row lock is acquired. |
-| Cancellation/history | Include cancelled bookings in history and allow cancellation after appointment start | Implemented. |
+| Topic                        | Approved policy                                                                                                                         | Current state                                                                                                                 |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Reset success/errors         | 200 with {}; invalid payloads and duplicate slot IDs return 400 without modifying existing state                                        | Implemented.                                                                                                                  |
+| Reset lifecycle              | Atomically clear bookings, slots, idempotency records and rate-limit attempts, then install submitted inventory                         | Implemented.                                                                                                                  |
+| Retry precedence             | Matching idempotency keys replay the original response and changed bodies return 422 before rate limiting                               | Implemented before admission.                                                                                                 |
+| Same-body identity           | Canonicalized parsed JSON preserving submitted strings; object key order/JSON formatting do not matter                                  | Implemented, including nested/unknown fields and retained array order.                                                        |
+| Response retention           | Retain until reset; cache successful bookings and deterministic domain errors, not transient infrastructure failures or 429             | Implemented: 201 and deterministic DTO/business 400/404/409; parser/auth/mismatch/infrastructure errors are not newly cached. |
+| Limit algorithm              | PostgreSQL rolling 60 seconds; count admitted attempts, including failed validation/business attempts when a usable email bucket exists | Implemented.                                                                                                                  |
+| Rejected/email-less attempts | Denied 429 does not extend the window; missing/unusable email gets normal validation error without a shared bucket                      | Implemented.                                                                                                                  |
+| History error policy         | Missing email or malformed/foreign cursor returns 400 Error JSON                                                                        | Implemented.                                                                                                                  |
+| Started/occupied precedence  | Return started-slot 400 before checking occupancy                                                                                       | Implemented, including a fresh clock check after the row lock is acquired.                                                    |
+| Cancellation/history         | Include cancelled bookings in history and allow cancellation after appointment start                                                    | Implemented.                                                                                                                  |
 
 The official operation-status matrix remains unchanged. Additional policy-defined responses are reset 400 and history 400 for missing email/malformed/foreign cursors. Unexpected infrastructure failures currently use generic 500 {error: "internal server error"}; this is implementation handling, not an official declared status.
 
 Reset checks required object/array/string types and timezone-qualified date-time values, accepts past/empty inventories, ignores unknown properties, and adds no duration/end-after-start rule. Because PostgreSQL text cannot contain a NUL character, it is rejected as invalid input with 400. Exact error wording is implementation-defined; only the Error envelope is required.
 
-Remaining minor source omissions include key/field size limits, byte-exact timestamp spelling, unknown-field identity nuances, and stale but otherwise well-formed cursors. Do not add extra restrictions or endpoints while implementing a later level. None blocks Levels 1–5. Email syntax uses class-validator IsEmail with its optional email maximum-length check disabled; no arbitrary name/slot-ID length, UUID, provider, domain whitelist or extra-property restriction was added. History and optional idempotency are implemented; 429/admission is implemented.
+Source omissions do not justify arbitrary key/field size limits, exact timestamp spelling or extra endpoints. The implemented input, identity and cursor policies below resolve the relevant behavior without changing the official contract.
 
-## Implemented Level 3 behaviour
+## Input and response policies
 
-Concurrent same-slot requests use PostgreSQL transactions and row locks; exactly one may create a confirmed booking, while occupied competitors return 409 Error JSON. Transactions acquire shared reset coordination then the slot row FOR UPDATE. A separate statement after the lock wait checks starts_at <= clock_timestamp() and returns 400 before the occupancy check. A missing slot remains 404.
+These details implement approved behavior; they are not additional requirements attributed to the official source.
 
-Cancellation reads the immutable slot ID under shared reset coordination, locks the slot row, then conditionally updates only a confirmed booking. It commits before returning the six-field cancelled Booking, preserves all original fields except status, retains the record and releases availability. Concurrent cancellations yield one 200 and competing 409 responses. Cancellation after start is permitted. Rebooking creates a new ID and never reactivates an old cancelled row.
+- Reset validates complete object/array/string/date-time input before destructive work, ignores unknown properties, accepts past slots and empty inventories, and adds no end-after-start rule.
+- Booking requires nonblank string slot_id/name/email. Name/email are trimmed; email uses class-validator IsEmail with its optional maximum-length check disabled and is stored lowercase. slot_id retains its submitted case/whitespace if nonblank. No arbitrary name/ID length, UUID, provider/domain whitelist or unknown-property restriction is added.
+- Invalid PostgreSQL text is rejected before SQL. GET/DELETE /bookings/{id} with decoded NUL return 400 {"error":"id must be a string"}; GET /slots with NUL provider returns 400 {"error":"provider must be a string"}. Authentication remains first. Valid absent IDs return 404; valid unmatched providers return 200 with an empty slots array.
+- Cancellation preserves all original public fields except status, keeps records, permits post-start cancellation and never reactivates a cancelled row. Rebooking creates a new ID.
+- Unexpected infrastructure failures return sanitized 500 {"error":"internal server error"}. They are not converted into domain conflicts.
 
-Cancellation/rebooking responses depend on which transaction obtains the slot lock first: booking before cancellation may return 409; after cancellation commits, one new booking can return 201. There is never more than one confirmed booking. GET /slots and GET /bookings/{id} retain their exact schemas. Level 4 now adds the specified idempotency/history behaviour below; rate limiting is now implemented and no additional route is introduced.
+## Idempotency contract details
 
-## Implemented Level 4 policies and runtime details
+Canonical parsed JSON recursively sorts object properties, preserves array order/types/submitted strings and includes unknown properties. JSON transport formatting/property order do not matter; name/email whitespace/case changes are different bodies even if normalized storage would match. A present empty Idempotency-Key is supported; no arbitrary key length or UUID rule is added.
 
-POST /bookings without Idempotency-Key preserves normal Level 1–3 creation/validation. With a key, authentication/parser processing runs first, then scoped PostgreSQL key synchronization and stored-result lookup. Matching canonical parsed JSON returns the original status/JSON/booking ID, including after cancellation or restart. Different parsed-body identity returns 422 before revalidation and leaves the original record unchanged.
+Replay returns the original status and JSON values, including after cancellation or restart. It does not promise byte-for-byte property order or transport Date headers. Cache 201 and deterministic validation/business 400/404/409 until reset; do not newly cache authentication 401, mismatch 422, admission 429, parser/canonicalization failures or infrastructure errors. A successful booking and its snapshot commit together; failed snapshot storage rolls both back.
 
-Canonical identity recursively sorts object keys, retains array order/value types and submitted strings, and includes unknown properties. JSON transport formatting/property order is ignored; name/email whitespace or case changes are different bodies even if storage normalization would match. SHA-256 fingerprints and fixed-size SHA-256 header-key identities are internal metadata. No public key-length/UUID rule is imposed; present empty-string keys are supported. Malformed/absent or non-finite JSON values cannot be fingerprinted and are not cached.
+## History and rate-limit policies
 
-New keyed successes and deterministic validation/start/missing/occupied errors are committed as 201/400/404/409 snapshots. Actual SQL failures are rolled back to a savepoint before caching a mapped domain error. A storage or transient infrastructure failure aborts booking/result work; no successful booking can commit without its response. Independently committed Level 5 admission remains counted. Records persist until the existing atomic reset clears them. 401, changed-key 422, infrastructure 500 and 429 are not newly cached. JSON value equality is guaranteed, not byte-for-byte property ordering or replay of transport Date headers.
+History accepts one nonblank email string and matches trim/lowercase; it does not extend POST email-syntax validation to GET. Missing/blank/repeated email, invalid/repeated limit, or malformed/repeated/foreign cursor returns 400. Limit defaults to 10; decimal-digit integers 1–50 are supported. Both statuses are ordered by (created_at, id). A valid signed cursor need not refer to a still-present row; it is not a frozen snapshot. Key rotation invalidates old cursors.
 
-History requires one nonblank email string, matched after trim/lowercase. GET does not impose POST's email-syntax validation. Missing/blank/repeated email, invalid/repeated limit and malformed/foreign/repeated cursor return 400 Error JSON. limit defaults to 10; integer decimal digits 1–50 are accepted. Both confirmed and cancelled records are included, oldest (created_at, id) first. Fetch limit + 1 with a strict tuple seek; return the existing {bookings, next_cursor} envelope and exactly six fields per Booking.
+Admission counts any nonblank string email after trim/lowercase, including invalid syntax. Missing/null/blank/non-string emails have no shared bucket. Unauthorized or unparseable requests do not reach admission. New attempts are counted before full validation/business work, so a full bucket returns 429 before those errors. Matching idempotency replay and mismatched-body 422 come first.
 
-Cursors are versioned, signed base64url tokens containing the email context, full PostgreSQL microsecond timestamp and booking ID. Clients must pass them back unchanged. Signature/encoding/version/date/context validation precedes SQL, and cross-email use returns 400. The seek boundary retains six fractional digits; no JavaScript millisecond round-trip is used. A valid token need not reference a still-present row. Replicas share cursor verification through the same API_KEY; rotating that key invalidates old cursors, requiring a fresh traversal. Tokens are not encrypted and are not a snapshot of a changing/reset dataset. No internal position_time, cancelled_at, request hash or scoped-key metadata appears in Booking responses.
+The rolling interval is (PostgreSQL now - 60 seconds, now]. A denied request returns {"error":"too many booking attempts"} and Retry-After as a positive whole-second ceiling until the oldest active event expires. Denials do not extend the window or create an idempotency record. Committed admission survives later booking failure; admission infrastructure failures fail closed with sanitized 500. Retry-After is guidance, not reserved capacity.
 
-## Level 5 implemented owner policy
+## ClinicSlot frontend BFF mapping (implementation; not new Koya endpoints)
 
-After authentication and JSON parsing, stored matching idempotency responses replay and changed-key bodies return 422 before admission. New keys and requests without keys are subject to a PostgreSQL rolling window: at most five admitted attempts per normalized email in (database now minus 60 seconds, database now]. Admission precedes full DTO validation, slot lookup/start/occupancy and insertion. Thus a full bucket returns 429 before those domain errors.
+The patient frontend calls fixed same-origin Next.js routes. These wrappers do not change the NestJS contract or constitute additional assessment endpoints.
 
-Any nonblank string email is usable after trim/lowercase, including invalid email syntax. Invalid name, missing slot_id, missing/occupied/started slot and invalid string email consume admitted attempts. Missing, null, blank and non-string email values return normal 400 validation errors without a shared bucket. Unauthorized or unparseable requests never reach admission.
+| Browser method/path                     | Authenticated Nest method/path      |
+| --------------------------------------- | ----------------------------------- |
+| GET /api/slots?provider=                | GET /slots?provider=                |
+| POST /api/bookings                      | POST /bookings                      |
+| GET /api/bookings?email=&limit=&cursor= | GET /bookings?email=&limit=&cursor= |
+| GET /api/bookings/{id}                  | GET /bookings/{id}                  |
+| DELETE /api/bookings/{id}               | DELETE /bookings/{id}               |
 
-Denied requests return 429 with {"error":"too many booking attempts"} and Retry-After containing a positive whole number of seconds, rounded up until the oldest active admission expires. Denials neither insert nor update events and do not change bookings or create an idempotency record. Retry-After is advisory: another admitted request may consume capacity before a retry. Failed booking/storage work does not undo committed admission; infrastructure failures return sanitized 500 and fail closed. No additional public field or endpoint was added. These choices implement approved owner policies, rather than claiming the source specifies all precedence/window details.
+No /api/reset, /reset wrapper or arbitrary-URL proxy exists. Server-only API_KEY and BACKEND_API_URL are never browser configuration. Supported query values (including duplicates), body strings, optional Idempotency-Key, success/error domain status and JSON are forwarded; path IDs/query values are encoded without UUID/case normalization. Retry-After is forwarded for 429. Browser-origin mutation protection rejects foreign Origin / cross-site requests with BFF-only 403. Other BFF-only errors are 400 unreadable/unsafe request, 503 invalid/missing configuration, 502 unavailable/malformed/redirecting upstream and 504 after a 15-second deadline. Upstream 5xx keep their status and use a sanitized {error: string}; raw internal responses are never exposed. Successful Booking remains exactly six fields; provider/date/time are joined in presentation from GET /slots, with a slot-reference fallback.
+
+All BFF responses use Cache-Control: no-store. Client credentials/cookies/internal backend headers are not forwarded. No patient login is implied: email history and booking-ID lookup do not verify identity. Frontend behavior and idempotency-intent lifetime are documented in ARCHITECTURE.md and frontend/README.md. These are frontend implementation policies, not claims about unspecified Koya requirements.

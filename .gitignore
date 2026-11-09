@@ -5,3 +5,5 @@ dist/
 .env.*
 !.env.example
 coverage/
+# Optional generated assessment reports belong in local/CI artifacts.
+/docs/audits/*.json

@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
-import type { INestApplication } from '@nestjs/common';
+import { type INestApplication, Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
@@ -10,6 +10,7 @@ import request, { type Response } from 'supertest';
 import type { App } from 'supertest/types';
 
 import { AppModule } from '../src/app.module';
+import { DatabaseService } from '../src/database/database.service';
 import { authenticated, makeApp, testApiKey, testUrl } from './support';
 
 const slot = {
@@ -74,6 +75,110 @@ describe('Level 2 — real PostgreSQL integration', () => {
     },
     { method: 'delete' as const, path: '/bookings/unknown', success: 404 },
   ];
+  const invalidTextRoutes = [
+    { method: 'get' as const, path: '/bookings/%00' },
+    { method: 'delete' as const, path: '/bookings/%00' },
+    { method: 'get' as const, path: '/slots?provider=%00' },
+  ];
+  it('recovers from a real idle PostgreSQL disconnect with a sanitized log', async () => {
+    const database = app.get(DatabaseService);
+    const result = await database.db.execute<{ pid: number }>(
+      sql`select pg_backend_pid() as pid`,
+    );
+    // Observe the real pool event, without substituting the pool or database.
+    const primaryPool = (database as unknown as { pool: Pool }).pool;
+    const logged = jest
+      .spyOn(Logger.prototype, 'error')
+      .mockImplementation(() => undefined);
+    let timeout: NodeJS.Timeout | undefined;
+    let listener: () => void = () => undefined;
+    const disconnected = new Promise<void>((resolve, reject) => {
+      listener = resolve;
+      primaryPool.once('error', listener);
+      timeout = setTimeout(
+        () => reject(new Error('idle disconnect event was not observed')),
+        5000,
+      );
+    });
+    try {
+      await pool.query('select pg_terminate_backend($1)', [result.rows[0].pid]);
+      await disconnected;
+      expect(logged).toHaveBeenCalledWith('database connection failed');
+      expect(logged.mock.calls).toEqual([['database connection failed']]);
+      await authenticated(app).get('/slots').expect(200);
+    } finally {
+      clearTimeout(timeout);
+      primaryPool.off('error', listener);
+      logged.mockRestore();
+    }
+  });
+  for (const route of invalidTextRoutes) {
+    it(
+      'rejects NUL before SQL: ' + route.method + ' ' + route.path,
+      async () => {
+        const response = await authenticated(app)
+          [route.method](route.path)
+          .expect(400);
+        expectError(response);
+        expect(response.body).toEqual({
+          error: route.path.startsWith('/slots')
+            ? 'provider must be a string'
+            : 'id must be a string',
+        });
+        expect(
+          (await pool.query('select count(*)::int as count from slots')).rows,
+        ).toEqual([{ count: 1 }]);
+        await authenticated(app).get('/slots').expect(200);
+      },
+    );
+    it.each(['missing', 'incorrect'])(
+      '%s key precedes invalid text: ' + route.method + ' ' + route.path,
+      async (kind) => {
+        const call = request(app.getHttpServer())[route.method](route.path);
+        if (kind === 'incorrect')
+          call.set('X-API-Key', randomBytes(32).toString('hex'));
+        expectError(await call.expect(401));
+      },
+    );
+  }
+  it('preserves arbitrary valid stored booking IDs for lookup and cancellation', async () => {
+    const created = await authenticated(app)
+      .post('/bookings')
+      .send(booking)
+      .expect(201);
+    const original = created.body as Booking;
+    const id = ' Mixed/Case?% café . ';
+    await pool.query('update bookings set id = $1 where id = $2', [
+      id,
+      original.id,
+    ]);
+    const path = '/bookings/' + encodeURIComponent(id);
+    const found = await authenticated(app).get(path).expect(200);
+    expect(found.body).toEqual({ ...original, id });
+    const cancelled = await authenticated(app).delete(path).expect(200);
+    expect(cancelled.body).toEqual({ ...original, id, status: 'cancelled' });
+    expectError(
+      await authenticated(app)
+        .get('/bookings/' + encodeURIComponent(id + 'x'))
+        .expect(404),
+    );
+  });
+  it('preserves exact arbitrary valid provider text without trimming or case folding', async () => {
+    const provider = ' Dr/Case?% café . ';
+    await authenticated(app)
+      .post('/reset')
+      .send({ slots: [{ ...slot, provider }] })
+      .expect(200);
+    const exact = await authenticated(app)
+      .get('/slots')
+      .query({ provider })
+      .expect(200);
+    expect((exact.body as { slots: unknown[] }).slots).toHaveLength(1);
+    await authenticated(app)
+      .get('/slots')
+      .query({ provider: provider.trim() })
+      .expect(200, { slots: [] });
+  });
   for (const route of routes) {
     it.each(['missing', 'empty', 'incorrect', 'whitespace'])(
       '%s API key rejects ' + route.method.toUpperCase() + ' ' + route.path,
@@ -163,7 +268,7 @@ describe('Level 2 — real PostgreSQL integration', () => {
     expectError(
       await request(app.getHttpServer())
         .get('/slots')
-        .set('X-API-Key', [testApiKey, testApiKey])
+        .set({ 'X-API-Key': [testApiKey, testApiKey] })
         .expect(401),
     );
   });

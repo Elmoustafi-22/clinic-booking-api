@@ -1,88 +1,96 @@
-# Backend architecture — Levels 1–5
+# Architecture
 
-Updated 7 November 2026. Levels 1–5, including PostgreSQL rolling admission, are implemented; the Next.js frontend proxy and deployment remain deferred. TESTING.md records actual verification, not an external assessor result. Official OpenAPI > official PDF > PRD > architecture > implementation remains the source priority; API.md separates the contract from owner policies.
+Updated 9 November 2026. Backend Levels 1–5 and the Next.js frontend are implemented and locally verified; hosted deployment remains unverified. The [API contract](API.md) separates official Koya requirements from approved implementation policies.
 
-## Components and boundaries
+## Components
 
-AppController exposes exactly the six official operations: POST /reset, GET /slots, POST /bookings, GET /bookings/:id, DELETE /bookings/:id and GET /bookings history. It maps HTTP inputs/statuses and delegates to services. No prefix, scaffold root, extra public endpoint or frontend functionality was introduced.
+| Component                               | Responsibility                                                                                           |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| AppController                           | Exposes exactly the six required Nest operations and delegates HTTP input/status handling to services.   |
+| ApiKeyGuard / ApiKeyMiddleware          | Validates the private startup credential and authenticates before JSON parsing and validation.           |
+| ResetService                            | Validates the complete replacement inventory, then atomically clears all four tables and installs slots. |
+| SlotsService                            | Exact provider filtering, start/ID ordering and availability derived from confirmed bookings.            |
+| BookingsService / BookingValidationPipe | Validation, normalization, booking insertion, lookup and conditional cancellation.                       |
+| IdempotencyService                      | Canonical request identity, key synchronization, replay and atomic response snapshots.                   |
+| BookingHistoryService / BookingCursor   | Email-based seek pagination and signed full-precision cursors.                                           |
+| BookingRateLimitService                 | Independently committed PostgreSQL admission events and whole-second Retry-After.                        |
+| DatabaseModule / DatabaseClock          | Drizzle pools, UTC sessions, database clock expressions, initialization and shutdown.                    |
+| Next.js BFF                             | Fixed patient-operation proxy with server-only credentials and sanitized upstream errors.                |
 
-- DatabaseModule supplies one typed Drizzle/node-postgres pool per Nest application, UTC sessions, startup connectivity validation and shutdown cleanup. Migrations run separately; startup never synchronizes schema.
-- ResetService validates all replacement slots before taking its exclusive transaction reset lock and atomically clears idempotency records, rate-attempt rows, bookings and slots before installing inventory. It returns 200 {}; invalid/duplicate input returns 400 without mutation. Past slots and empty arrays remain valid.
-- SlotsService derives availability in one correlated NOT EXISTS confirmed-booking query, with exact provider filtering and start/ID ordering. No duplicated mutable availability flag exists.
-- BookingsService retains the Level 3 slot-lock/start/occupancy/insert protocol and conditional cancellation. It now chooses normal creation when Idempotency-Key is absent or delegates keyed work to IdempotencyService using the same transaction-aware insertion method.
-- IdempotencyService owns scoped key synchronization, persisted response replay, savepoint recovery and atomic booking/result commit. It calls BookingRateLimitService only after resolving stored replay/mismatch.
-- BookingHistoryService validates query parameters and uses a single ordered seek query; BookingCursor encodes and authenticates continuation tokens. Public Booking objects retain the same six fields.
-- ApiErrorFilter retains {error: string}; unrelated database errors remain sanitized 500. Secrets, request bodies and internal metadata are not logged or returned.
+Controllers remain thin. No extra Nest root, health, Swagger UI or version-prefix route exists. No process-local state is a booking or rate-limit correctness guarantee.
 
-Nest's automatic body parsing remains disabled in application/test factories. ApiKeyMiddleware invokes the reusable guard check before Express parsing on all official paths, and APP_GUARD also protects handlers before service work. API_KEY is required/validated at startup and captured privately. Authentication therefore precedes body validation, hashing, key lookup and pagination validation.
+## Authentication and errors
 
-## Booking and cancellation transaction boundaries
+Nest disables its default body parser so middleware can authenticate before JSON/urlencoded parsing. A global guard enforces the same key check. Missing, empty, incorrect or repeated X-API-Key headers return 401 with exactly {error: string}. API_KEY is validated at initialization and compared using fixed-size digests.
 
-Without an idempotency key, the transaction takes shared reset protection, awaits independently committed admission, then invokes BookingValidationPipe. It rejects missing/non-string/blank values, trims only name/email, validates email and preserves submitted slot_id exactly. The service lowercases stored email. Unknown fields and arbitrary name/ID lengths remain unrestricted by custom business rules.
+Shared input checks reject NUL before PostgreSQL text binding, including lookup, cancellation and provider filtering. Valid identifiers retain exact case/whitespace/punctuation; no UUID restriction is added. ApiErrorFilter sanitizes unexpected exceptions. Both pools use fixed-message idle-error logging; no credentials or exception objects are logged by those handlers.
 
-Booking uses explicit READ COMMITTED: shared transaction reset lock -> independent admission -> DTO validation -> slot FOR UPDATE -> a separate database wall-clock statement after any lock wait -> confirmed occupancy check -> insert -> commit. Missing slot is 404, started/equal-now is 400 before occupied-slot 409. The existing partial unique index remains the independent double-booking guarantee. Only pg.DatabaseError 23505 for table bookings and bookings_one_confirmed_per_slot_idx maps to 409; other constraints/errors remain infrastructure failures.
+## Booking and cancellation
 
-Cancellation takes shared reset coordination, reads immutable slot_id without a booking lock, locks that slot, then conditionally updates id AND confirmed status. Only status/cancelled_at change; the six-field cancelled Booking is returned after commit. Missing ID is 404, repeated/concurrent loser 409. Records and original timestamps remain; cancellation after start is allowed and later rebooking creates another ID.
+Booking uses READ COMMITTED transactions:
 
-## Durable idempotency and canonical identity
+1. Acquire shared reset coordination.
+2. Commit email admission independently.
+3. Validate the body; trim name/email, validate email and store it lowercase. Preserve slot_id exactly.
+4. Lock the slot FOR UPDATE; absence is 404.
+5. In a separate statement after the lock wait, compare starts_at to the PostgreSQL wall clock. A started/equal-now slot is 400.
+6. Check confirmed occupancy, insert and commit. Occupancy is 409.
 
-The scope is the stable internal single-client namespace clinic-api plus POST /bookings. It is not the API secret or patient email, so reuse of one key with another email/body is a mismatch, and credential rotation does not silently discard records. An absent header bypasses idempotency; a present empty string is a key because the official header schema has no minimum length.
+The partial unique index on slot_id WHERE status='confirmed' independently prevents double-booking. Only SQLSTATE 23505 for table bookings and the named bookings_one_confirmed_per_slot_idx becomes 409; unrelated integrity failures remain sanitized infrastructure errors.
 
-Hashing uses SHA-256 over UTF-8 canonical parsed JSON: recursively lexically sorted object keys, retained array order, JSON-serialized primitives and unchanged submitted string values. Formatting/key order outside strings does not matter; trimmed/case-normalized equivalence is deliberately not used. Unknown fields, nested arrays/objects and special own keys participate in identity without reconstructing unsafe prototype properties. Unsupported/non-finite JSON values cannot be fingerprinted and return 400; malformed/absent JSON is not cached as a keyed domain result.
+Cancellation acquires shared reset protection, reads immutable slot_id without a booking lock, locks that slot, then updates only the matching confirmed booking. Status/cancelled_at change; ID, patient fields and creation time remain. Missing ID is 404; no conditional-update result is 409. Concurrent cancellations have one winner. Cancellation after start is allowed. Rebooking inserts a new ID; cancelled records are retained.
 
-The original header key is independently SHA-256 hashed into a fixed-size identity stored in idempotency_records.key. This avoids the PostgreSQL B-tree entry-size limit without adding an arbitrary public key-length restriction. The composite primary key remains the uniqueness backstop; cryptographic digest identity is distinct from the shorter lock hash.
+## Idempotency
 
-Keyed processing uses explicit READ COMMITTED on a single pooled connection:
+Keys are scoped to the stable internal namespace clinic-api and POST /bookings, not to patient email or the current API secret. Header identity and canonical parsed JSON are SHA-256 hashed separately. Canonicalization recursively sorts object keys while retaining array order, types, submitted strings and unknown properties. No arbitrary key-length restriction is introduced.
 
-1. Acquire the shared reset transaction advisory lock.
-2. Acquire a transaction advisory lock in the two-integer namespace 410402, using a signed 32-bit SHA-256-derived lock ID over scope/operation/key identity. The two-integer keyspace is disjoint from reset's one-bigint keyspace. Lock-hash collisions only serialize unrelated keys; lookup uses the full scoped SHA-256 identity.
-3. Read persisted state after obtaining the lock. Matching request_hash replays only response_status/response_body. A changed fingerprint returns 422 and leaves the original record untouched.
-4. For a new key, await independently committed admission before opening a Drizzle nested transaction (PostgreSQL savepoint), then run DTO validation and the shared Level 3 booking insertion logic. No second connection is needed for this savepoint.
-5. Success releases the savepoint but remains uncommitted in the outer transaction. Deterministic 400 validation/start, 404 slot and 409 slot errors roll back to the savepoint first, then become cacheable Error JSON. The named actual uniqueness violation is mapped by booking logic and likewise recovered before any further SQL. Unrelated/transient errors abort the outer transaction and are not cached.
-6. Store the original response status/JSON snapshot, then commit the outer transaction before sending a response. Failure to store the result rolls back the booking too. There is no committed pending row, lease or background worker.
+Keyed processing acquires shared reset protection, then a transaction-scoped key lock and reads the stored result under READ COMMITTED. Matching bodies replay the original status/JSON; mismatches return 422 before admission.
 
-Records are retained until reset, without TTL. A replay after cancellation returns the original confirmed response/ID, even though GET returns the current cancelled record. Commit followed by lost HTTP response is recoverable with the same key; crash/rollback before commit leaves no successful booking/result pair. Authentication 401, mismatched-key 422, infrastructure 500 and 429 are not newly cached. Error records may legitimately have no booking; this is why there is no mandatory booking FK.
+New keys commit admission first, then run validation/booking in a nested transaction (savepoint). Deterministic 400/404/409 errors roll back the savepoint before their snapshots are stored. Successful booking and response snapshot commit in the same outer transaction. Response-store failure therefore cannot leave a committed successful booking without its result. Infrastructure failures and 429 are not cached; admission remains counted after later failure.
 
-JSONB snapshots preserve JSON values, not serialized property order, Date/connection headers or byte-for-byte HTTP framing. No internal hashes, scoped keys or response-status wrappers leak into public JSON. The controller uses passthrough response status to replay original 201/400/404/409 correctly.
+Records persist until reset. Replay returns the original response even after cancellation; lookup returns current state. JSON values/status are replayed, not byte-exact HTTP framing or transport Date headers. There is no pending lease or background worker.
 
-## Cursor history algorithm and precision
+## Lock order and reset
 
-GET /bookings requires a nonblank string email, normalized by trim/lowercase for matching. It does not invent a new email-syntax requirement for GET. limit defaults to 10; decimal-digit strings representing integers 1–50 are accepted, and malformed/out-of-range/repeated values return 400. cursor is optional; malformed, repeated or foreign cursors return 400.
+| Operation         | Order                                                                                           |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| New keyed booking | Shared reset → key → independent email admission → savepoint/validation → slot → booking/result |
+| Unkeyed booking   | Shared reset → independent admission → validation → slot → booking                              |
+| Cancellation      | Shared reset → slot → booking                                                                   |
+| Reset             | Exclusive reset → clear results/attempts/bookings/slots → install inventory                     |
 
-One SQL statement filters the canonical stored email, includes both statuses, orders immutable (created_at, id) ascending, seeks with tuple > the decoded boundary and fetches limit + 1. Return at most limit six-field bookings; a continuation is produced only when an extra row exists, otherwise next_cursor is null. No offset or cursor-row lookup is used.
+Reset uses one-bigint transaction advisory key 410401. Key synchronization uses two-integer namespace 410402; email admission uses 410403. Short digest collisions can serialize unrelated identities but do not change full-digest record identity.
 
-PostgreSQL to_char(created_at AT TIME ZONE 'UTC', ...) obtains six fractional digits for the cursor position. That string goes directly back to timestamptz in the seek predicate; it never passes through JavaScript Date for boundary reconstruction. Public created_at serialization remains compatible with existing endpoints at millisecond precision. Equal timestamps use the text booking-ID tie-breaker; sub-millisecond timestamps remain traversable without gaps/duplicates on an unchanged dataset.
+Admission never reacquires its parent's reset/key protection: a queued exclusive reset could otherwise deadlock parent and child. No operation acquires key/reset protection after row locks. Locks release on commit/rollback; no session locks are held across pooled transactions.
 
-The opaque token is base64url(JSON [version, normalized email, full-precision UTC timestamp, ID]) plus a base64url HMAC-SHA-256 signature. The signing key is domain-separated from the existing server API_KEY; no new environment variable is required. Verify signature in constant time, canonical encoding, version, email context, actual date-time validity and safe string ID before SQL. No timestamp is cast through Date to form the query boundary. The token is integrity protected, not encrypted; ordering/email/ID data already belongs to the public query/Booking contract, and internal database columns are not returned.
+## Rolling admission
 
-Replicas must share API_KEY to accept each other's cursors. Rotating it invalidates old cursors with 400, while database idempotency records remain scoped independently. Pagination is a live listing, not a frozen snapshot: later commits may appear later or behind a traversed boundary. Deleting the boundary row does not invalidate a valid token. After reset, clients should begin a fresh traversal of the replaced dataset.
+Any nonblank string email defines a trimmed/lowercase hashed bucket, even if its syntax is invalid. Missing/blank/non-string values create no shared bucket. PostgreSQL time is sampled after acquiring the email lock. At most five admissions fall in (now - 60 seconds, now]; failed validation/business attempts count.
 
-## Lock ordering, reset and failure review
+The sixth returns 429 and a positive whole-second ceiling until the oldest active admission expires. Denials do not extend the window. Replay/mismatch takes precedence. Admission uses a separate max-4 pool while parent transactions retain primary clients; the primary pool defaults to 10. Budget 14 connections per replica plus operational headroom.
 
-Keyed booking order is shared reset -> idempotency key -> independent email admission -> savepoint/validation -> slot -> booking work. Unkeyed booking uses reset -> independent admission -> validation -> slot; cancellation remains reset -> slot -> booking. No operation acquires a key after a slot or a reset lock after row locks. Reset obtains exclusive coordination before deleting any table, so it cannot interleave inventory/result deletion with keyed replay/commit. All locks release on commit/rollback; no process-local correctness mutex or pooled session lock exists.
+Admission errors fail closed. Events remain until reset; expired events are ignored, not automatically removed. Timeouts and hosted sizing are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
 
-Savepoint rollback releases its booking/slot changes while the outer reset/key lock remains held until caching finishes. Unrelated storage errors are outside the domain-error recovery block, so failed idempotency writes cannot be mislabeled 409/422 or leave a successful booking committed alone. Existing FK, status/cancellation checks and partial unique index remain unchanged. No schema migration was needed.
+## Cursor pagination
 
-## Verification and operational boundary
+History normalizes its required email for matching, includes both statuses and orders by (created_at, id). One statement seeks strictly beyond the decoded tuple and fetches limit + 1; default limit is 10, range 1–50.
 
-TESTING.md records full Level 1–5 checks, concurrent retries across independent Nest instances, different-key slot competition, atomic store failure, savepoint recovery, cursor portability and microsecond/tie traversal. Earlier history-absence staging assertions were updated for the newly authorized route, rather than removing prior test cases. Finite tests do not replace the independent database invariant or establish hosted/load guarantees.
+Cursors contain version, email context, full PostgreSQL microsecond UTC timestamp and ID, with a domain-separated HMAC-SHA-256 signature derived from API_KEY. Validate encoding/signature/context/date/ID before SQL. Cursor timestamps never round-trip through JavaScript Date; public timestamp serialization remains compatible.
 
-Level 5 uses the existing attempts schema; see the admission protocol below and TESTING.md for actual checks.
+All replicas need the same API_KEY. Rotation invalidates old cursors. Tokens are signed, not encrypted; pagination is a live listing rather than a frozen snapshot. A boundary row need not still exist. Restart traversal after reset.
 
-Next.js/proxy, hosting, production lock/statement-timeout policy, external assessment and previous dependency-audit remediation remain separate work. Stop after Level 5; frontend and deployment require separate authorization.
+## Patient frontend and BFF
 
-## PostgreSQL admission protocol — Level 5
+Pages are /, /book?slot_id=, /find-booking and /history. Query-based slot selection preserves literal dot-segment IDs. Client state remains feature-local; appointment details are joined from slots without adding Booking fields.
 
-BookingRateLimitService owns a separate bounded node-postgres pool (max 4; the existing primary pool defaults to 10). Parents retain primary connections/reset/key locks while admission commits. Separate capacity prevents every primary client waiting for a child on the same exhausted pool. Both pools close with the Nest application. Plan up to 14 database connections per replica plus migrations/administration; there is no new dependency or environment variable.
+Only GET /api/slots, GET/POST /api/bookings and GET/DELETE /api/bookings/[id] are exposed. The server-only helper injects API_KEY, allows known queries, encodes IDs, refuses redirects and arbitrary targets, and does not forward caller cookies/credentials. There is no reset proxy. Mutations reject foreign Origin/cross-site metadata using the public Host.
 
-The caller must hold the shared reset transaction lock before invoking admission. On a dedicated READ COMMITTED connection, acquire a transaction advisory lock in two-integer namespace 410403 using the first signed 32 bits of SHA-256(trimmed lowercase email). Read database clock_timestamp AFTER that lock, retaining microsecond precision as a UTC SQL timestamp string. Count existing events within (now-60 seconds, now]. If fewer than five, insert one event and COMMIT before booking processing. Otherwise commit without mutation and throw 429 with ceil(oldest active event + 60 seconds - now), at least 1. The filter writes Retry-After while retaining the error-only JSON envelope.
+Responses are no-store. Domain JSON/status and positive integer Retry-After are preserved; internal errors are sanitized. The upstream deadline is 15 seconds. UI intent keys survive unchanged retries in the current page, rotate after edits and are lost on reload/navigation. No mutation is retried automatically.
 
-All instances use the same PostgreSQL lock, so a waiter reads the previous committed admission before counting; count and insert are serialized for each email. Hash-lock collisions merely serialize distinct full-digest identities. The existing email/time/id index supports the count and oldest expiry. The full SHA-256 normalized-email identity is stored in the existing email column, supporting even oversized/NUL invalid string input without B-tree/text failures. It is pseudonymous identity, not encryption.
+Responsive controls, visible focus, skip navigation, reduced motion and a Radix cancellation dialog support usability. They do not constitute formal accessibility certification. The application key is integration authentication, not patient identity verification.
 
-Admission never takes a slot/key/reset lock or borrows a primary client. In particular, reacquiring shared reset inside the child could wait behind an exclusive reset that itself waits for the parent: this is deliberately avoided. The parent already protects both commits from reset. A queued reset runs only after the outer booking/result transaction ends and clears attempts/bookings/results atomically. No cross-pool lock cycle exists in the application protocol.
+## Verification and operating limits
 
-New keyed admission is outside the cacheable-domain-error savepoint block, so 429 and admission failures cannot become cached results. Key ownership across admission ensures concurrent identical requests consume once. Unfingerprintable parsed bodies with a usable email count admission for a new key and remain uncached 400; an existing key with such a different body is 422 before admission. Parser/authentication failures occur earlier.
+See [TESTING.md](TESTING.md) for executed results and [DATABASE.md](DATABASE.md) for schema/index details. Tests cover real concurrent HTTP requests, multiple independent Nest instances, rollback faults and restart persistence. Finite tests do not establish hosted load/failover guarantees.
 
-A later booking/savepoint/result-write rollback leaves the independently committed admission intact. Admission SQL, connection or COMMIT failure aborts processing with generic 500, without silently permitting a booking. A lost COMMIT acknowledgment can leave a counted attempt with a 500 response; conservative counting is intentional. Admission uses a 30-second connection timeout, 15-second lock timeout and 20-second statement timeout; resource overload/external lock holders may therefore fail closed. The primary pool also uses a bounded 30-second connection wait to tolerate burst queues while parent clients retain reset/key protection. No retries or process-local correctness state were added.
-
-Events remain until reset; expired events are excluded by the indexed time predicate, with no cleanup job implemented. Production retention, pool sizing/load testing, PostgreSQL clock administration and primary transaction timeout policy require deployment review. This local implementation does not claim infinite capacity or hosted assessment success.
+Startup checks database connectivity before listening; migrations run separately. Pools close on shutdown and handle idle disconnects. Hosted TLS, readiness monitoring, backups, logs, retention policy and patient-data access remain release considerations in [DEPLOYMENT.md](DEPLOYMENT.md).

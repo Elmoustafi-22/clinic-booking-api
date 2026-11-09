@@ -1,16 +1,16 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { and, asc, eq, notExists } from 'drizzle-orm';
 import { DatabaseService } from '../database/database.service';
 import { bookings, slots } from '../database/schema';
+import { stringInput } from '../common/input';
 
 @Injectable()
 export class SlotsService {
   constructor(private readonly database: DatabaseService) {}
 
   async list(provider: unknown) {
-    if (provider !== undefined && typeof provider !== 'string') {
-      throw new BadRequestException('provider must be a string');
-    }
+    const filter =
+      provider === undefined ? undefined : stringInput(provider, 'provider');
     const result = await this.database.db
       .select({
         id: slots.id,
@@ -30,7 +30,7 @@ export class SlotsService {
         ),
       })
       .from(slots)
-      .where(provider === undefined ? undefined : eq(slots.provider, provider))
+      .where(filter === undefined ? undefined : eq(slots.provider, filter))
       .orderBy(asc(slots.start), asc(slots.id));
     return { slots: result };
   }
